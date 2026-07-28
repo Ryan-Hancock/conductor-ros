@@ -60,6 +60,21 @@ check: ## validate every example's graph (conductor check)
 	  $(CLI) check examples/$$ex || exit 1; \
 	done
 
+.PHONY: check-envs
+check-envs: ## validate examples/patrol in each declared environment
+	@for env in sim bench robot; do \
+	  echo "== env $$env"; \
+	  $(CLI) check examples/patrol -env $$env | tail -3 || exit 1; \
+	done
+
+.PHONY: bundle
+bundle: ## build a release bundle for examples/patrol (no target touched)
+	$(CLI) deploy examples/patrol -env bench -bundle
+
+.PHONY: deploy-dry
+deploy-dry: ## show what deploying examples/patrol to its robot would run
+	$(CLI) deploy examples/patrol -env robot -dry-run -goarch $$(go env GOARCH) -cc gcc
+
 .PHONY: verify
 verify: fmt vet test-race check ## everything that runs without a live ROS graph
 

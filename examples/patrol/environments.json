@@ -1,0 +1,33 @@
+{
+  "default": "sim",
+  "environments": {
+    "sim": {
+      "transport": "inproc",
+      "params": ["params.sim.yaml"],
+      "without": ["engage_estop"]
+    },
+    "bench": {
+      "transport": "inproc",
+      "params": ["params.sim.yaml"],
+      "without": ["engage_estop"],
+      "deploy": {
+        "scope": "user"
+      }
+    },
+    "robot": {
+      "transport": "zenoh",
+      "endpoint": "tcp/127.0.0.1:7447",
+      "domain": 0,
+      "params": ["params.robot.yaml"],
+      "metrics_addr": ":9090",
+      "deploy": {
+        "host": "pi@patrol-1",
+        "goarch": "arm64",
+        "tags": ["zenoh"],
+        "cgo": true,
+        "cc": "aarch64-linux-gnu-gcc",
+        "env": {"ROS_DOMAIN_ID": "0"}
+      }
+    }
+  }
+}

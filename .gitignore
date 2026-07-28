@@ -1,5 +1,8 @@
-gen/
-bin/
+# Generated artifacts from `conductor build` and `conductor deploy`. Anchored
+# to the example apps: a bare "gen/" also matches internal/gen, the package
+# that produces them.
+examples/*/gen/
+/bin/
 # Local zenoh/rmw_zenoh toolchain (downloaded debs, extracted overlay,
 # prebuilt zenoh-c); keep the scripts, not the downloaded artifacts.
 .tools/*

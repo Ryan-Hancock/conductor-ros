@@ -1,0 +1,4 @@
+# Simulation: no hardware to damage, so the robot may move at full speed.
+navigator:
+  ros__parameters:
+    max_speed: 2.0

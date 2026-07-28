@@ -373,6 +373,71 @@ func (g *Graph) BringupOrder() (order []string, cycles []string) {
 	for i, n := range g.App.Nodes {
 		names[i] = n.Name
 	}
+	needs := g.dependencies()
+
+	position := map[string]int{}
+	for i, n := range names {
+		position[n] = i
+	}
+	indegree := map[string]int{}
+	for _, n := range names {
+		indegree[n] = len(needs[n])
+	}
+
+	var ready []string
+	for _, n := range names {
+		if indegree[n] == 0 {
+			ready = append(ready, n)
+		}
+	}
+	done := map[string]bool{}
+	for len(ready) > 0 {
+		sort.Slice(ready, func(i, j int) bool { return position[ready[i]] < position[ready[j]] })
+		n := ready[0]
+		ready = ready[1:]
+		order = append(order, n)
+		done[n] = true
+		for _, other := range names {
+			if done[other] || !needs[other][n] {
+				continue
+			}
+			indegree[other]--
+			if indegree[other] == 0 {
+				ready = append(ready, other)
+			}
+		}
+	}
+	for _, n := range names {
+		if !done[n] {
+			cycles = append(cycles, n)
+			order = append(order, n)
+		}
+	}
+	return order, cycles
+}
+
+// Dependencies reports, for each node, the nodes it consumes from directly:
+// the publishers of its subscribed topics and the servers of the services and
+// actions it calls. Deployment turns these into systemd ordering.
+func (g *Graph) Dependencies() map[string][]string {
+	out := map[string][]string{}
+	for node, deps := range g.dependencies() {
+		names := make([]string, 0, len(deps))
+		for d := range deps {
+			names = append(names, d)
+		}
+		sort.Strings(names)
+		out[node] = names
+	}
+	return out
+}
+
+// dependencies maps node -> set of nodes providing something it consumes.
+func (g *Graph) dependencies() map[string]map[string]bool {
+	names := make([]string, len(g.App.Nodes))
+	for i, n := range g.App.Nodes {
+		names[i] = n.Name
+	}
 	// providers maps an endpoint name to the nodes providing it.
 	providers := map[string][]string{}
 	for _, t := range g.Topics {
@@ -410,57 +475,21 @@ func (g *Graph) BringupOrder() (order []string, cycles []string) {
 		}
 	}
 
-	position := map[string]int{}
-	for i, n := range names {
-		position[n] = i
-	}
 	needs := map[string]map[string]bool{}
-	indegree := map[string]int{}
 	for _, n := range names {
 		needs[n] = map[string]bool{}
 	}
 	for _, n := range names {
 		for _, endpoint := range consumes[n] {
 			for _, provider := range providers[endpoint] {
-				if provider == n || needs[n][provider] {
+				if provider == n {
 					continue
 				}
 				needs[n][provider] = true
-				indegree[n]++
 			}
 		}
 	}
-
-	var ready []string
-	for _, n := range names {
-		if indegree[n] == 0 {
-			ready = append(ready, n)
-		}
-	}
-	done := map[string]bool{}
-	for len(ready) > 0 {
-		sort.Slice(ready, func(i, j int) bool { return position[ready[i]] < position[ready[j]] })
-		n := ready[0]
-		ready = ready[1:]
-		order = append(order, n)
-		done[n] = true
-		for _, other := range names {
-			if done[other] || !needs[other][n] {
-				continue
-			}
-			indegree[other]--
-			if indegree[other] == 0 {
-				ready = append(ready, other)
-			}
-		}
-	}
-	for _, n := range names {
-		if !done[n] {
-			cycles = append(cycles, n)
-			order = append(order, n)
-		}
-	}
-	return order, cycles
+	return needs
 }
 
 func allInternalSvc(eps []SvcEndpoint) bool {

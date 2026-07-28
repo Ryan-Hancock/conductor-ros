@@ -32,6 +32,13 @@ type App struct {
 	// collected from //ros:type directives across the module.
 	Messages  map[string]string
 	Externals []External
+
+	// Environments are declared in environments.json (see environments.go).
+	// Env is the one this App has been resolved for, nil until Resolve.
+	Environments map[string]*Environment
+	EnvNames     []string
+	DefaultEnv   string
+	Env          *Environment
 }
 
 type Node struct {
@@ -140,6 +147,9 @@ func ScanApp(dir string) (*App, error) {
 	}
 	if app.Name == "" {
 		app.Name = filepath.Base(abs)
+	}
+	if err := loadEnvironments(abs, app); err != nil {
+		return nil, err
 	}
 
 	err = walkGoFiles(root, func(path string, f *ast.File, fset *token.FileSet) {

@@ -8,9 +8,11 @@
 //	conductor graph [dir]   print the topic graph as Graphviz dot
 //	conductor build [dir]   check, compile the app, and write gen/ artifacts
 //	conductor test [dir]    check the graph, then run the app's Go tests
+//	conductor deploy [dir]  build a release bundle and install it on a target
 package main
 
 import (
+	"flag"
 	"fmt"
 	"os"
 	"os/exec"
@@ -28,20 +30,18 @@ func main() {
 		usage()
 		os.Exit(2)
 	}
-	dir := "."
-	if len(os.Args) > 2 {
-		dir = os.Args[2]
-	}
 	var err error
 	switch os.Args[1] {
 	case "check":
-		err = runCheck(dir)
+		err = runCheck(os.Args[2:])
 	case "graph":
-		err = runGraph(dir)
+		err = runGraph(os.Args[2:])
 	case "build":
-		err = runBuild(dir)
+		err = runBuild(os.Args[2:])
 	case "test":
 		err = runTest(os.Args[2:])
+	case "deploy":
+		err = runDeploy(os.Args[2:])
 	case "msggen":
 		err = runMsggen(os.Args[2:])
 	default:
@@ -56,12 +56,23 @@ func main() {
 
 func usage() {
 	fmt.Fprint(os.Stderr, `usage:
-  conductor check [dir]   scan and validate the application graph
-  conductor graph [dir]   print the topic graph as Graphviz dot
-  conductor build [dir]   check, compile the app, and write gen/ artifacts
+  conductor check [dir] [-env <name>]
+                          scan and validate the application graph
+  conductor graph [dir] [-env <name>]
+                          print the topic graph as Graphviz dot
+  conductor build [dir] [-env <name>]
+                          check, compile the app, and write gen/ artifacts
   conductor test [dir] [go test flags...]
                           validate the graph, then run the application's Go
                           tests (see the conductortest package)
+  conductor deploy [dir] -env <name> [flags]
+                          build a release bundle (binary, parameters, systemd
+                          units) and install it on the environment's target
+                            -host, -goarch, -tags, -prefix, -scope, -version
+                            -bundle      build the bundle, do not ship it
+                            -dry-run     print what would run on the target
+                            -no-restart  install without restarting the app
+                            -rollback    switch the target back one release
   conductor msggen -out <dir> [-pkg <gopkg>] [-ros-pkg <pkg>] <target...>
                           generate Go message types (with computed RIHS01
                           hashes) from .msg definitions; targets are ROS
@@ -71,13 +82,28 @@ func usage() {
 `)
 }
 
-func runCheck(dir string) error {
-	_, _, err := check(dir, true)
+func runCheck(args []string) error {
+	dir, args := splitDir(args)
+	fs := flag.NewFlagSet("check", flag.ExitOnError)
+	env := fs.String("env", "", "environment to validate for (see environments.json)")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	_, _, err := check(dir, *env, true)
 	return err
 }
 
-func check(dir string, report bool) (*scan.App, *graph.Graph, error) {
-	app, err := scan.ScanApp(dir)
+// splitDir peels the optional leading directory argument off a command line.
+func splitDir(args []string) (string, []string) {
+	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
+		return args[0], args[1:]
+	}
+	return ".", args
+}
+
+// check scans and validates an application, reporting the graph if asked.
+func check(dir, env string, report bool) (*scan.App, *graph.Graph, error) {
+	app, err := resolve(dir, env)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -91,9 +117,22 @@ func check(dir string, report bool) (*scan.App, *graph.Graph, error) {
 	return app, g, nil
 }
 
+// resolve scans dir and resolves it for an environment, without validating.
+func resolve(dir, env string) (*scan.App, error) {
+	app, err := scan.ScanApp(dir)
+	if err != nil {
+		return nil, err
+	}
+	return app.Resolve(env)
+}
+
 func printReport(app *scan.App, g *graph.Graph, issues []graph.Issue) {
-	fmt.Printf("app %s — %d node(s), %d topic(s), %d external interface(s)\n\n",
-		app.Name, len(app.Nodes), len(g.Topics), len(app.Externals))
+	env := ""
+	if app.Env != nil {
+		env = fmt.Sprintf(" [env %s]", app.Env.Name())
+	}
+	fmt.Printf("app %s%s — %d node(s), %d topic(s), %d external interface(s)\n\n",
+		app.Name, env, len(app.Nodes), len(g.Topics), len(app.Externals))
 
 	fmt.Println("nodes:")
 	for _, n := range app.Nodes {
@@ -185,8 +224,14 @@ func printReport(app *scan.App, g *graph.Graph, issues []graph.Issue) {
 	}
 }
 
-func runGraph(dir string) error {
-	_, g, err := check(dir, false)
+func runGraph(args []string) error {
+	dir, args := splitDir(args)
+	fs := flag.NewFlagSet("graph", flag.ExitOnError)
+	env := fs.String("env", "", "environment to render (see environments.json)")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	_, g, err := check(dir, *env, false)
 	if err != nil {
 		return err
 	}
@@ -194,8 +239,14 @@ func runGraph(dir string) error {
 	return nil
 }
 
-func runBuild(dir string) error {
-	app, g, err := check(dir, true)
+func runBuild(args []string) error {
+	dir, args := splitDir(args)
+	fs := flag.NewFlagSet("build", flag.ExitOnError)
+	env := fs.String("env", "", "environment to build for (see environments.json)")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	app, g, err := check(dir, *env, true)
 	if err != nil {
 		return err
 	}
@@ -233,11 +284,8 @@ func runBuild(dir string) error {
 // makes every behavioural test fail for the same uninformative reason, so it
 // is worth reporting first, in its own vocabulary.
 func runTest(args []string) error {
-	dir := "."
-	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
-		dir, args = args[0], args[1:]
-	}
-	app, _, err := check(dir, true)
+	dir, args := splitDir(args)
+	app, _, err := check(dir, "", true)
 	if err != nil {
 		return err
 	}

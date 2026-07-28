@@ -78,6 +78,8 @@ where the ROS overlay lives:
 ```sh
 make            # list targets
 make verify     # fmt + vet + tests + graph validation of every example
+make check-envs # validate the example in each declared environment
+make bundle     # build a deployable release bundle for the example
 make interop    # the full matrix against real ROS 2 (needs .tools/env.sh)
 make turtlesim  # the tutorial below, router and turtlesim_node included
 ```
@@ -257,6 +259,49 @@ exactly 0.25. Type changes are refused rather than silently coerced, and
 Parameter files use the ROS subset (`node: / ros__parameters: / key: value`),
 parsed by conductor itself rather than pulling in a YAML dependency;
 anything outside that shape is a clear error with a file and line.
+
+**Environments are declared, and they are part of the graph.** What changes
+between a simulator, a bench and a robot is not the application: it is who
+else is on the ROS graph, which transport reaches them, and where the binary
+runs. That belongs in configuration, so it lives in `environments.json` next
+to `conductor.json`:
+
+```json
+{
+  "default": "sim",
+  "environments": {
+    "sim":   {"transport": "inproc", "params": ["params.sim.yaml"],
+              "without": ["engage_estop"]},
+    "robot": {"transport": "zenoh", "params": ["params.robot.yaml"],
+              "metrics_addr": ":9090",
+              "externals": [{"topic": "scan", "type": "sensor_msgs/msg/LaserScan",
+                             "role": "publisher", "qos": "sensor"}],
+              "deploy": {"host": "pi@patrol-1", "goarch": "arm64",
+                         "tags": ["zenoh"], "cgo": true,
+                         "cc": "aarch64-linux-gnu-gcc"}}
+  }
+}
+```
+
+An environment's `externals` are merged over the base ones (same topic and
+role replaces), and `without` drops them. Because externals are what the
+graph checker uses to decide whether a subscription has a publisher, this
+makes the checker environment-aware:
+
+```sh
+$ conductor check examples/patrol -env sim
+app patrol [env sim] — 3 node(s), 4 topic(s), 2 external interface(s)
+  warning CND021: service "engage_estop": served by safety_monitor but nothing calls it
+✓ graph valid: 0 errors, 1 warning(s)
+
+$ conductor check examples/patrol -env robot
+✓ graph valid: 0 errors, 0 warning(s)
+```
+
+There is no operator console in simulation, so nothing calls the e-stop
+service there — a true statement about that environment, reported at build
+time instead of discovered in it. `graph`, `build` and `deploy` take `-env`
+the same way.
 
 ## Lifecycle and bringup order
 
@@ -451,9 +496,90 @@ Apps like this one finish, rather than running forever: end with
 after the lifecycle hooks and the transport have shut down. `os.Exit` would
 skip that and leave stale entries on the ROS graph.
 
+## Deployment
+
+Shipping a ROS 2 application usually means shipping a colcon workspace and
+its apt/rosdep dependency lattice. A conductor app is one static binary, and
+`conductor deploy` is the rest of the story:
+
+```sh
+conductor deploy examples/patrol -env robot
+```
+
+1. validates the graph **for that environment** (a deploy of a broken graph
+   is never worth attempting),
+2. cross-compiles for the target (`goarch`, build tags, cgo/`cc` when the
+   zenoh transport is in),
+3. stages the binary, `params.yaml` plus the environment's overlays, the
+   launch file, **systemd units, and a manifest**,
+4. tars it, copies it over ssh, and runs the bundle's `install.sh` there.
+
+**The units are derived from the graph, not hand-written.** The bringup order
+conductor already computes becomes real systemd ordering:
+
+```ini
+# patrol-safety_monitor.service
+After=network-online.target patrol-navigator.service
+Wants=patrol-navigator.service
+ExecStart=/opt/conductor/patrol/current/bin/patrol -node safety_monitor \
+  -transport zenoh -zenoh-endpoint tcp/127.0.0.1:7447 -domain 0 \
+  -params /opt/conductor/patrol/current/params.yaml \
+  -params /opt/conductor/patrol/current/params.robot.yaml -metrics-addr :9091
+```
+
+Ordering only — `Wants`, never `Requires` — because a provider restarting
+should not take its consumers down; the lifecycle already handles a peer that
+is not up yet. Everything the process needs is on the `ExecStart` line, so
+`systemctl cat` tells the whole truth about what is running.
+
+Some consequences of knowing the graph statically:
+
+- **The transport decides the process layout.** An `inproc` environment
+  deploys as *one* unit running every node, because that bus does not leave
+  the process; a zenoh environment gets one unit per node. Getting this
+  wrong is invisible until the robot is silent.
+- **Metrics ports are assigned, not collided.** `metrics_addr: ":9090"` with
+  three nodes means `:9090`, `:9091`, `:9092`.
+- **Mistakes are refused before the build.** An environment on the zenoh
+  transport built without `-tags zenoh` is an error at deploy time, not an
+  "unknown transport" exit on the robot.
+
+Releases are versioned and switchable:
+
+```
+/opt/conductor/patrol/releases/20260728-210502/
+/opt/conductor/patrol/current -> releases/20260728-210502
+```
+
+```sh
+conductor deploy examples/patrol -env robot -rollback   # symlink swap + restart
+conductor deploy examples/patrol -env robot -dry-run    # print what would run there
+conductor deploy examples/patrol -env bench -bundle     # build the tarball only
+```
+
+The bundle is self-contained: `install.sh` is generated with the values
+already in it, so an operator can copy the tarball to a robot with no network
+and run it by hand. `manifest.json` records the version, git revision, build
+platform, unit list, per-file checksums, and a **graph fingerprint** — a hash
+of every topic, type, QoS and parameter — so "what is this robot actually
+running?" has an answer that does not depend on trusting a timestamp.
+
+`-scope user` installs `systemd --user` units under a prefix in `$HOME`,
+which is how the whole path is exercised without a robot:
+
+```
+$ conductor deploy examples/patrol -env bench
+installed patrol 20260728-210502 at ~/.local/share/conductor/patrol/releases/20260728-210502
+restarted patrol.target
+
+$ systemctl --user status patrol.service
+● patrol.service - patrol (conductor, env bench)
+     Active: active (running)
+```
+
 ## Status
 
-v1.0 — the static toolchain (scan → validate → generate) works; the runtime
+v1.1 — the static toolchain (scan → validate → generate) works; the runtime
 executes nodes over a pluggable transport: in-process bus by default, or
 Zenoh/rmw_zenoh to join a live ROS 2 graph (see above). CDR serialization is
 pure Go, byte-verified against rclpy; `.msg`/`.srv`/`.action` codegen
@@ -463,18 +589,22 @@ transports; every node is a managed node with graph-derived bringup order;
 parameters load from environment-overlaid files and update live through the
 ROS parameter services; tracing and metrics are built in; and a whole
 application runs inside `go test` with deterministic timers and no sleeps.
+Environments are declared and the checker is environment-aware, and
+`conductor deploy` cross-compiles, bundles and installs a release — with
+graph-derived systemd units — over ssh, with rollback.
 `.tools/interop.sh` checks every leg against real ROS 2 — 22 of them,
-including the whole turtlesim tutorial. Not yet done:
-transient-local latching, per-environment *externals*, multi-instance node
-namespacing, and `conductor deploy`. See [DESIGN.md](DESIGN.md).
+including the whole turtlesim tutorial. Not yet done: transient-local
+latching, multi-instance node namespacing, task orchestration, and TF
+conventions. See [DESIGN.md](DESIGN.md).
 
 ## Layout
 
 - [conductor (root package)](run.go) — runtime: node wiring, executors, transport registry
-- [cmd/conductor](cmd/conductor/main.go) — CLI: `check`, `graph`, `build`
-- [internal/scan](internal/scan/scan.go) — syntactic scanner for directives and declarations
+- [cmd/conductor](cmd/conductor/main.go) — CLI: `check`, `graph`, `build`, `test`, `deploy`, `msggen`
+- [internal/scan](internal/scan/scan.go) — syntactic scanner for directives and declarations ([environments](internal/scan/environments.go))
 - [internal/graph](internal/graph/graph.go) — topic graph construction + validation rules
-- [internal/gen](internal/gen/gen.go) — launch/params/dot generation
+- [internal/gen](internal/gen/gen.go) — launch/params/dot and [systemd unit](internal/gen/systemd.go) generation
+- [internal/deploy](internal/deploy/deploy.go) — cross-compile, bundle, ship, roll back
 - [cdr](cdr/cdr.go) — pure-Go CDR (XCDR1-LE) codec, golden-tested against rclpy
 - [transport/rmwzenoh](transport/rmwzenoh/rmwzenoh.go) — rmw_zenoh wire conventions (pure Go, golden-tested against live traffic)
 - [transport/zenoh](transport/zenoh/zenoh.go) — the cgo Zenoh transport (`-tags zenoh`)

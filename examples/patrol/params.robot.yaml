@@ -1,0 +1,4 @@
+# The real robot: half a metre per second until the safety case says more.
+navigator:
+  ros__parameters:
+    max_speed: 0.5

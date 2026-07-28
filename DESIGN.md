@@ -1,10 +1,11 @@
 # Conductor — Design
 
-*Status: v1.0 — static toolchain + pluggable-transport runtime, an
+*Status: v1.1 — static toolchain + pluggable-transport runtime, an
 rmw_zenoh transport verified against live ROS 2 (Lyrical) traffic,
 `.msg`/`.srv`/`.action`-to-Go codegen with local REP-2011 hash computation,
-lifecycle, parameters, observability, and an in-process test harness. This
-document records the vision, the architecture, and the decisions still
+lifecycle, parameters, observability, an in-process test harness, declared
+environments, and single-binary deployment with graph-derived systemd units.
+This document records the vision, the architecture, and the decisions still
 open.*
 
 ## Thesis
@@ -170,8 +171,8 @@ consolidation explicitly, with a comment) are the exact places bugs hide.
 | Actions (client, e.g. calling Nav2) | boilerplate | `ActionClient[G,F,R]` with goal handles, feedback channels, cancellation | ✅ v0.6 |
 | Observability | `/rosout` + prayer | a span per callback with W3C trace context propagated through messages; Prometheus metrics per node/topic/callback | ✅ v0.8 |
 | Testing | `launch_testing` | the whole app inside `go test`: in-process transport, deterministic timers, settle-not-sleep, typed publish/record/call | ✅ v1.0 |
-| Deployment | colcon + rosdep + apt | cross-compiled static binary, `conductor deploy` | v1.1 |
-| Per-env config (sim/dev/robot-N) | copy-pasted YAML | `-params` files plus `-env` overlays (parameters done; per-environment *externals* still open) | ✅ v0.9 (partial) |
+| Deployment | colcon + rosdep + apt | `conductor deploy`: cross-compiled binary, release bundle with a manifest, systemd units whose ordering is the graph's bringup order, ssh install, rollback | ✅ v1.1 |
+| Per-env config (sim/dev/robot-N) | copy-pasted YAML | `environments.json`: per-environment externals, transport, parameter overlays and deploy target; `check/graph/build/deploy -env` | ✅ v1.1 |
 | Task orchestration (state machines/BTs) | XML/hand-rolled | declarative mission layer | v1.2 |
 | TF conventions | boilerplate | declared static transforms, frame checks in graph | v1.2 |
 
@@ -231,6 +232,55 @@ mistake otherwise surfaces as a pile of behavioural failures with no
 explanation. That ordering is the same instinct as the rest of the design:
 say what is wrong in the vocabulary of the mistake.
 
+## Environments and deployment (v1.1, implemented)
+
+Environments live in `environments.json` beside `conductor.json` — a separate
+file, following the Encore split the open question below argued for: the
+application model is code, the environments it runs in are configuration. An
+environment declares its transport, parameter overlays, the externals present
+there (merged over the base set, or dropped with `without`), and a deploy
+target.
+
+The payoff is that **the checker becomes environment-aware**. Externals are
+what tell the graph checker a subscription has a publisher, so declaring them
+per environment means `conductor check -env sim` can report that a service
+nothing calls in simulation, or a topic no driver publishes there, is exactly
+that — before anything runs, in the vocabulary of the environment.
+
+Deployment is then mostly mechanical, and deliberately so: cross-compile,
+stage, tar, copy, run the bundle's `install.sh`. What makes it Conductor's
+rather than a shell script is the same static knowledge everything else uses:
+
+- **Units are a projection of the graph.** One unit per node, with `After=`
+  taken from the dependency edges that produce the bringup order, and cycle
+  edges dropped because systemd breaks ordering cycles arbitrarily.
+  Ordering only (`Wants=`, never `Requires=`): a provider restarting must not
+  stop its consumers, since the lifecycle already handles a peer that is not
+  up. The launch file and the units are two renderings of one order.
+- **The transport chooses the process layout.** An `inproc` environment
+  deploys as a single unit running every node — its bus does not leave the
+  process, so a unit per node would be a set of mutually silent robots. This
+  is knowable statically and is therefore refused statically.
+- **What cannot work is refused before the build.** An environment on the
+  zenoh transport without `-tags zenoh` would exit on the robot with
+  "unknown transport"; a cgo cross-build with no `cc` would fail late. Both
+  are deploy-time errors with the fix in the message.
+- **Releases are versioned and switchable.** `releases/<version>` with a
+  `current` symlink, a recorded previous, and `-rollback` as a symlink swap
+  plus a restart. The manifest records the graph fingerprint (a hash of every
+  topic, type, QoS and parameter), so "what is this robot running?" is
+  answerable without trusting timestamps.
+
+The install script is generated with its values already substituted rather
+than being a template driven by flags, because the robot is where debugging
+is hardest: an operator with no network can read it and run it by hand.
+
+Known limitation: the zenoh transport is cgo, so a release that joins a live
+ROS graph is not the fully static binary the pure-Go path produces — it needs
+a cross toolchain with zenoh-c for the target. This is the deployment-side
+cost of the transport decision above, and the argument for a pure-Go zenoh
+client.
+
 ## Non-goals
 
 - Hard-realtime control (stays in C++/ros2_control; interop via externals).
@@ -247,18 +297,24 @@ say what is wrong in the vocabulary of the mistake.
 3. Namespacing/remapping model — per-instance node names when the same struct
    runs twice (e.g. two cameras). Likely: instance tags in `Run` +
    namespace field in conductor.json.
-4. Parameters now have environment overlays (`-params` + `-env`, resolved
-   as params.<env>.yaml). The open half is *externals*: should
-   `conductor.json` also gain per-environment sections, so a sim
-   configuration can declare different external publishers than a robot?
-   (Encore precedent: keep the app model in code, environments in config —
-   which argues for a separate environments file over conductor.json
-   sections.)
+4. ~~Per-environment externals~~ (RESOLVED in v1.1): a separate
+   `environments.json`, as the Encore precedent argued. What remains open is
+   how far an environment may reach — it currently overrides externals,
+   transport, parameters and the deploy target, but not QoS profiles or node
+   membership (a node that only exists on the robot). Node membership in
+   particular starts to look like a different application rather than a
+   different environment, which is probably the line.
 5. Sim-in-CI: the harness covers logic; scenario tests against Gazebo (or a
    rosbag fixture replayed through the zenoh transport) are the missing
    layer, and they need a story for time — likely `/clock` and a simulated
    time source behind the same Tick abstraction.
-6. Services/actions API shape: `Svc[Req,Res]` with `OnField(Req) (Res,
+6. Fleet deployment: `conductor deploy` targets one host. Rolling a release
+   across N robots wants a fleet file, per-robot parameter overlays (which
+   the environment mechanism already supports, one environment per robot at
+   the cost of repetition), and a health gate between robots — roll on if
+   the graph came up, stop if it did not. The runtime already knows whether
+   every node reached Active, so the gate has something real to read.
+7. Services/actions API shape: `Svc[Req,Res]` with `OnField(Req) (Res,
    error)` is the obvious mirror; actions need goal/feedback/result and
    cancellation — design against Nav2's action servers as the reference
    consumer.

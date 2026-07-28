@@ -1,0 +1,10 @@
+{
+  "app": "fibonacci",
+  "externals": [
+    {
+      "topic": "fibonacci",
+      "type": "example_interfaces/action/Fibonacci",
+      "role": "action_client"
+    }
+  ]
+}

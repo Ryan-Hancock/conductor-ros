@@ -1,0 +1,28 @@
+{
+  "app": "patrol",
+  "externals": [
+    {
+      "topic": "estop",
+      "type": "std_msgs/msg/Bool",
+      "role": "publisher",
+      "qos": "transient"
+    },
+    {
+      "topic": "cmd_vel",
+      "type": "geometry_msgs/msg/Twist",
+      "role": "subscriber",
+      "qos": "reliable"
+    },
+    {
+      "topic": "patrol_status",
+      "type": "patrol_msgs/msg/PatrolStatus",
+      "role": "subscriber",
+      "qos": "reliable"
+    },
+    {
+      "topic": "engage_estop",
+      "type": "std_srvs/srv/SetBool",
+      "role": "client"
+    }
+  ]
+}

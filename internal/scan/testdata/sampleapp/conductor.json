@@ -1,0 +1,11 @@
+{
+  "app": "sample",
+  "externals": [
+    {
+      "topic": "estop",
+      "type": "std_msgs/msg/Bool",
+      "role": "publisher",
+      "qos": "transient"
+    }
+  ]
+}

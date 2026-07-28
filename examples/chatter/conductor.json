@@ -1,0 +1,11 @@
+{
+  "app": "chatter",
+  "externals": [
+    {
+      "topic": "chatter",
+      "type": "std_msgs/msg/String",
+      "role": "publisher",
+      "qos": "reliable"
+    }
+  ]
+}

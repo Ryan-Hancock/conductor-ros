@@ -1,0 +1,6 @@
+gen/
+bin/
+# Local zenoh/rmw_zenoh toolchain (downloaded debs, extracted overlay,
+# prebuilt zenoh-c); keep only the env setup script.
+.tools/*
+!.tools/env.sh

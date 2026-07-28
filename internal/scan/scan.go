@@ -35,18 +35,18 @@ type App struct {
 }
 
 type Node struct {
-	StructName string
-	Name       string // snake_case node name
-	File       string
-	Line       int
-	Subs       []Endpoint
-	Pubs       []Endpoint
-	Services   []ServiceEndpoint // servers (Svc fields)
-	Clients    []ServiceEndpoint // clients (Client fields)
-	Actions       []ActionEndpoint // action servers (Action fields)
-	ActionClients []ActionEndpoint // action clients (ActionClient fields)
-	Params     []Param
-	Timers     []Timer
+	StructName    string
+	Name          string // snake_case node name
+	File          string
+	Line          int
+	Subs          []Endpoint
+	Pubs          []Endpoint
+	Services      []ServiceEndpoint // servers (Svc fields)
+	Clients       []ServiceEndpoint // clients (Client fields)
+	Actions       []ActionEndpoint  // action servers (Action fields)
+	ActionClients []ActionEndpoint  // action clients (ActionClient fields)
+	Params        []Param
+	Timers        []Timer
 	// Methods maps method name to its signature shape for handler checks.
 	Methods map[string]MethodSig
 }

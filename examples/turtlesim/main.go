@@ -11,9 +11,10 @@
 package main
 
 import (
+	"fmt"
 	"log/slog"
 	"math"
-	"os"
+	"runtime"
 	"time"
 
 	"conductor.dev/conductor"
@@ -58,8 +59,8 @@ func (t *TurtleDriver) OnStart() {
 
 func (t *TurtleDriver) tutorial() {
 	fail := func(step string, err error) {
-		slog.Error("step failed", "step", step, "err", err)
-		os.Exit(1)
+		conductor.Abort(fmt.Errorf("%s: %w", step, err))
+		runtime.Goexit() // stop the tutorial; Run does the cleanup
 	}
 
 	// 1. Service call: draw with a thick red pen.
@@ -105,7 +106,7 @@ func (t *TurtleDriver) tutorial() {
 	slog.Info("rotate finished", "status", status.String(), "delta", result.Delta)
 
 	slog.Info("turtlesim tutorial complete", "final_x", t.latest.X, "final_y", t.latest.Y, "final_theta", t.latest.Theta)
-	os.Exit(0)
+	conductor.Shutdown()
 }
 
 // driveForward publishes velocity until the turtle has moved dist, judging

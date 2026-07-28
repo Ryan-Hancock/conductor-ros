@@ -6,7 +6,8 @@
 # which swallowed replies whenever BOTH peers were conductor processes.
 #
 #   ./.tools/interop.sh            run every leg
-#   ./.tools/interop.sh services   one group (services | actions | lifecycle | params)
+#   ./.tools/interop.sh services   one group
+#                                  (services | actions | lifecycle | params | turtlesim)
 #
 # Requires a ROS 2 install plus the user-space rmw_zenoh overlay in .tools
 # (see env.sh). Starts and stops its own zenoh router.
@@ -55,6 +56,8 @@ pkill -9 -x patrol 2>/dev/null
 pkill -9 -x fibonacci 2>/dev/null
 pkill -9 -x mission 2>/dev/null
 pkill -9 -f pyfib_server.py 2>/dev/null
+pkill -9 -x turtlesim 2>/dev/null
+pkill -9 -x turtlesim_node 2>/dev/null
 pkill -9 -x rmw_zenohd 2>/dev/null
 sleep 1
 
@@ -62,6 +65,7 @@ echo "building..."
 go build -tags zenoh -o "$BIN/patrol" ./examples/patrol
 go build -tags zenoh -o "$BIN/fibonacci" ./examples/fibonacci
 go build -tags zenoh -o "$BIN/mission" ./examples/mission
+go build -tags zenoh -o "$BIN/turtlesim" ./examples/turtlesim
 
 echo "starting zenoh router..."
 bg "$WORK/router.log" "$CONDUCTOR_OVERLAY/lib/rmw_zenoh_cpp/rmw_zenohd"
@@ -215,6 +219,32 @@ if [[ "$GROUP" == all || "$GROUP" == actions ]]; then
   sleep 4
   timeout 40 "$BIN/mission" -transport zenoh >"$WORK/act_go_to_py.log" 2>&1
   check "conductor client -> rclpy server" "$WORK/act_go_to_py.log" "status=SUCCEEDED"
+fi
+
+if [[ "$GROUP" == all || "$GROUP" == turtlesim ]]; then
+  echo "turtlesim:"
+  # The whole tutorial against the real C++ turtlesim_node in one process:
+  # subscription, publisher, parameter, three service clients and an action
+  # client, all talking to a node that knows nothing about conductor.
+  # turtlesim needs a display (WSLg provides one at :0); skip without it.
+  if [[ -z "${DISPLAY:-}" ]] || ! ros2 pkg prefix turtlesim >/dev/null 2>&1; then
+    echo "  SKIP  turtlesim tutorial (needs the turtlesim package and a display)"
+  else
+    bg "$WORK/turtlesim_node.log" ros2 run turtlesim turtlesim_node
+    turtle_pid="$LAST_PID"
+    sleep 4
+
+    timeout 150 "$BIN/turtlesim" -transport zenoh >"$WORK/turtle.log" 2>&1
+    check "turtlesim pose -> conductor subscription" "$WORK/turtle.log" "first pose from turtlesim"
+    check "conductor cmd_vel drives the turtle in a square" "$WORK/turtle.log" "completed edge edge=4"
+    check "conductor service client -> turtlesim spawn" "$WORK/turtle.log" "name=turtle2"
+    check "conductor action client -> turtlesim rotate_absolute" "$WORK/turtle.log" "status=SUCCEEDED"
+    check "tutorial runs to completion" "$WORK/turtle.log" "turtlesim tutorial complete"
+
+    kill -9 "$turtle_pid" 2>/dev/null
+    pkill -9 -x turtlesim_node 2>/dev/null # ros2 run forks the real node
+    sleep 1
+  fi
 fi
 
 echo

@@ -12,6 +12,8 @@ import (
 	"reflect"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 	"unicode"
@@ -106,13 +108,47 @@ func Run(nodes ...any) {
 
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
-	s := <-sig
-	slog.Info("conductor: shutting down", "signal", s.String())
+	select {
+	case s := <-sig:
+		slog.Info("conductor: shutting down", "signal", s.String())
+	case <-stopCh:
+		slog.Info("conductor: shutting down", "reason", "requested by the application")
+	}
 	a.stop()
 	for _, nr := range a.rt.nodes {
 		slog.Info("conductor: node summary", "node", nr.name,
 			"processed", nr.processed.Load(), "dropped", nr.dropped.Load())
 	}
+	if err := stopErr.Load(); err != nil {
+		slog.Error("conductor: aborted", "err", *err)
+		os.Exit(1)
+	}
+}
+
+var (
+	stopOnce sync.Once
+	stopCh   = make(chan struct{})
+	stopErr  atomic.Pointer[error]
+)
+
+// Shutdown asks the running application to stop: the nodes are deactivated
+// and cleaned up through their lifecycle hooks, the transport is closed, and
+// Run returns. Safe to call from any goroutine, and safe to call twice.
+//
+// Apps that finish — a mission, a scripted test run — should end this way
+// rather than with os.Exit, which would skip that cleanup and leave stale
+// entries on the ROS graph until discovery times them out.
+func Shutdown() {
+	stopOnce.Do(func() { close(stopCh) })
+}
+
+// Abort is Shutdown for the failure case: the same clean stop, but err is
+// logged and the process exits non-zero.
+func Abort(err error) {
+	stopOnce.Do(func() {
+		stopErr.Store(&err)
+		close(stopCh)
+	})
 }
 
 func envDomain() int {

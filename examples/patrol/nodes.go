@@ -55,11 +55,11 @@ func (n *Navigator) OnPose(p msgs.PoseStamped) {
 
 //conductor:node
 type SafetyMonitor struct {
-	Cmd      conductor.Sub[msgs.Twist]                              `topic:"cmd_vel" qos:"reliable"`
-	Estop    conductor.Sub[msgs.Bool]                               `topic:"estop" qos:"transient"`
-	Status   conductor.Pub[PatrolStatus]                            `topic:"patrol_status" qos:"reliable"`
+	Cmd      conductor.Sub[msgs.Twist]                                `topic:"cmd_vel" qos:"reliable"`
+	Estop    conductor.Sub[msgs.Bool]                                 `topic:"estop" qos:"transient"`
+	Status   conductor.Pub[PatrolStatus]                              `topic:"patrol_status" qos:"reliable"`
 	Engage   conductor.Svc[srvs.SetBoolRequest, srvs.SetBoolResponse] `service:"engage_estop"`
-	Watchdog conductor.Timer                                        `rate:"1hz"`
+	Watchdog conductor.Timer                                          `rate:"1hz"`
 
 	lastCmd time.Time
 	stopped bool

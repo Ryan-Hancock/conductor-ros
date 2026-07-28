@@ -8,8 +8,8 @@
 package main
 
 import (
+	"fmt"
 	"log/slog"
-	"os"
 	"time"
 
 	"conductor.dev/conductor"
@@ -18,7 +18,7 @@ import (
 
 //conductor:node
 type Mission struct {
-	Start conductor.Timer                                                          `rate:"1hz"`
+	Start conductor.Timer                                                           `rate:"1hz"`
 	Fib   conductor.ActionClient[FibonacciGoal, FibonacciFeedback, FibonacciResult] `action:"fibonacci" timeout:"60s"`
 
 	started bool
@@ -39,8 +39,8 @@ func (m *Mission) run() {
 	slog.Info("sending goal", "order", goal.Order)
 	h, err := m.Fib.SendGoal(goal)
 	if err != nil {
-		slog.Error("goal failed", "err", err)
-		os.Exit(1)
+		conductor.Abort(fmt.Errorf("sending goal: %w", err))
+		return
 	}
 	slog.Info("goal accepted", "id", h.ID())
 
@@ -61,11 +61,11 @@ func (m *Mission) run() {
 
 	res, status, err := h.Result()
 	if err != nil {
-		slog.Error("result failed", "err", err)
-		os.Exit(1)
+		conductor.Abort(fmt.Errorf("waiting for result: %w", err))
+		return
 	}
 	slog.Info("goal finished", "status", status.String(), "sequence", res.Sequence)
-	os.Exit(0)
+	conductor.Shutdown()
 }
 
 func main() {

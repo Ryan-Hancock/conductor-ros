@@ -100,10 +100,10 @@ SamePkgType nested
 
 	// type_id spot checks against the FieldType constant table.
 	ids := map[string]int{
-		"covariance": 11 + offsetArray,     // DOUBLE_ARRAY = 59
-		"window":     6 + offsetBounded,    // INT32_BOUNDED_SEQUENCE = 102
-		"path":       1 + offsetUnbounded,  // NESTED_TYPE_UNBOUNDED_SEQUENCE = 145
-		"label":      idBoundedString,      // BOUNDED_STRING = 21
+		"covariance": 11 + offsetArray,    // DOUBLE_ARRAY = 59
+		"window":     6 + offsetBounded,   // INT32_BOUNDED_SEQUENCE = 102
+		"path":       1 + offsetUnbounded, // NESTED_TYPE_UNBOUNDED_SEQUENCE = 145
+		"label":      idBoundedString,     // BOUNDED_STRING = 21
 	}
 	for name, want := range ids {
 		if got := typeID(fields[name].Type); got != want {

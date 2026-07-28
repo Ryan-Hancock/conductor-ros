@@ -63,8 +63,8 @@ func TestNodeFilter(t *testing.T) {
 }
 
 type Tuned struct {
-	MaxSpeed Param[float64] `name:"max_speed" default:"1.5"`
-	Label    Param[string]  `default:"idle"`
+	MaxSpeed Param[float64]       `name:"max_speed" default:"1.5"`
+	Label    Param[string]        `default:"idle"`
 	Period   Param[time.Duration] `default:"250ms"`
 }
 

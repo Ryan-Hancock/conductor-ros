@@ -11,7 +11,7 @@ import (
 
 // TopicSpec describes one endpoint of a topic as declared by a node.
 type TopicSpec struct {
-	Topic string       // topic name as declared, without leading slash
+	Topic string // topic name as declared, without leading slash
 	QoS   QoS
 	Type  reflect.Type // message struct type
 	Node  string       // declaring node's name

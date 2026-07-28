@@ -71,6 +71,16 @@ go run ./cmd/conductor build examples/patrol # compile + emit gen/ artifacts
 ./examples/patrol/gen/bin/patrol -node navigator   # run a single node
 ```
 
+Or through the [Makefile](Makefile), which wraps the same commands and knows
+where the ROS overlay lives:
+
+```sh
+make            # list targets
+make verify     # fmt + vet + tests + graph validation of every example
+make interop    # the full matrix against real ROS 2 (needs .tools/env.sh)
+make turtlesim  # the tutorial below, router and turtlesim_node included
+```
+
 `conductor build` emits, under `examples/patrol/gen/`:
 
 - `patrol.launch.xml` — a ROS 2 launch file, one process per node
@@ -310,6 +320,68 @@ conductor_callback_duration_sum_seconds{node="navigator",kind="subscription",nam
 conductor_node_lifecycle_state{node="navigator"} 3
 ```
 
+## The turtlesim tutorial, in conductor
+
+[examples/turtlesim](examples/turtlesim/main.go) is the classic ROS 2
+tutorial — drive the turtle, spawn a second one, teleport it, rotate with an
+action — written as one conductor node against the real C++ `turtlesim_node`,
+which knows nothing about conductor:
+
+```go
+//conductor:node
+type TurtleDriver struct {
+	Pose    conductor.Sub[Pose]      `topic:"turtle1/pose" qos:"sensor"`
+	Cmd     conductor.Pub[Twist]     `topic:"turtle1/cmd_vel" qos:"reliable"`
+	EdgeLen conductor.Param[float64] `name:"edge_length" default:"2.0"`
+
+	Spawn    conductor.Client[SpawnRequest, SpawnResponse]       `service:"spawn" timeout:"5s"`
+	SetPen   conductor.Client[SetPenRequest, SetPenResponse]     `service:"turtle1/set_pen" timeout:"5s"`
+	Teleport conductor.Client[TeleportAbsoluteRequest, TeleportAbsoluteResponse] `service:"turtle2/teleport_absolute" timeout:"5s"`
+	Rotate   conductor.ActionClient[RotateAbsoluteGoal, RotateAbsoluteFeedback, RotateAbsoluteResult] `action:"turtle1/rotate_absolute" timeout:"30s"`
+}
+```
+
+Every interface type came from one command — no ROS build, no colcon:
+
+```sh
+conductor msggen -out examples/turtlesim -pkg main \
+  geometry_msgs/msg/Twist turtlesim_msgs/msg/Pose \
+  turtlesim_msgs/srv/{Spawn,SetPen,TeleportAbsolute} \
+  turtlesim_msgs/action/RotateAbsolute
+```
+
+turtlesim's own endpoints are declared as externals in
+[conductor.json](examples/turtlesim/conductor.json), so `conductor check`
+still validates the whole graph — names, types and QoS — before anything
+runs. Then:
+
+```sh
+make turtlesim   # or: ros2 run turtlesim turtlesim_node, then the example
+```
+
+```
+INFO first pose from turtlesim x=5.544 y=5.544 theta=0
+INFO set_pen: turtle1 now draws in red
+INFO completed edge edge=1 x=7.584 y=5.544
+...
+INFO completed edge edge=4 x=5.509 y=5.556
+INFO spawned a second turtle name=turtle2
+INFO teleported turtle2 to (8, 8)
+INFO rotate feedback remaining=3.136
+INFO rotate finished status=SUCCEEDED delta=-3.119
+INFO turtlesim tutorial complete final_theta=3.124
+```
+
+The square closes to within 0.04 of where it started because the drive loop
+watches the pose topic rather than dead-reckoning, and the final heading is
+π because the action ran to completion. `make interop-turtlesim` runs the
+whole thing as a five-assertion regression test.
+
+Apps like this one finish, rather than running forever: end with
+`conductor.Shutdown()` (or `conductor.Abort(err)` to fail), and `Run` returns
+after the lifecycle hooks and the transport have shut down. `os.Exit` would
+skip that and leave stale entries on the ROS graph.
+
 ## Status
 
 v0.9 — the static toolchain (scan → validate → generate) works; the runtime
@@ -321,7 +393,8 @@ Topics, services, and actions all work in both directions on both
 transports; every node is a managed node with graph-derived bringup order;
 parameters load from environment-overlaid files and update live through the
 ROS parameter services; and tracing and metrics are built in.
-`.tools/interop.sh` checks every leg against real ROS 2. Not yet done:
+`.tools/interop.sh` checks every leg against real ROS 2 — 22 of them,
+including the whole turtlesim tutorial. Not yet done:
 transient-local latching, per-environment *externals*, multi-instance node
 namespacing, and `conductor deploy`. See [DESIGN.md](DESIGN.md).
 
@@ -338,3 +411,4 @@ namespacing, and `conductor deploy`. See [DESIGN.md](DESIGN.md).
 - [msgs](msgs/msgs.go) — hand-written common ROS message types + registered type hashes
 - [examples/patrol](examples/patrol/nodes.go) — example application
 - [examples/chatter](examples/chatter/main.go) — minimal ROS-interop example
+- [examples/turtlesim](examples/turtlesim/main.go) — the ROS 2 turtlesim tutorial, in conductor

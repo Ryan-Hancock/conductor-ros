@@ -38,7 +38,19 @@ func (s *Sub[T]) bind(rt *runtimeState, nr *nodeRuntime, field reflect.StructFie
 	}
 	s.topic = topic
 	spec := TopicSpec{Topic: topic, QoS: q, Type: reflect.TypeFor[T](), Node: nr.name}
-	return rt.transport.Subscribe(spec, func(msg any) {
-		nr.enqueue(func() { h(msg.(T)) })
+	rt.recordConsumes(nr.name, topic)
+	return rt.transport.Subscribe(spec, func(msg any, md Metadata) {
+		// Inactive nodes do not process messages, per the managed-node
+		// design; check on delivery so the mailbox is not filled either.
+		if !nr.active() {
+			return
+		}
+		counter("conductor_messages_received_total", "node", nr.name, "topic", topic).Add(1)
+		nr.enqueue(func() {
+			if !nr.active() {
+				return
+			}
+			nr.runInstrumented(SpanSubscription, topic, md.Trace, func() { h(msg.(T)) })
+		})
 	})
 }

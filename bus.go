@@ -18,14 +18,14 @@ func init() {
 // onto that node's executor). Messages are passed by value, never serialized.
 type inproc struct {
 	mu      sync.RWMutex
-	subs    map[string][]func(any)
+	subs    map[string][]func(any, Metadata)
 	pubs    map[string][]string
 	servers map[string]func(any) (any, error)
 }
 
 func newInproc() *inproc {
 	return &inproc{
-		subs:    map[string][]func(any){},
+		subs:    map[string][]func(any, Metadata){},
 		pubs:    map[string][]string{},
 		servers: map[string]func(any) (any, error){},
 	}
@@ -33,22 +33,22 @@ func newInproc() *inproc {
 
 func (b *inproc) DeclareNode(string) error { return nil }
 
-func (b *inproc) Publisher(spec TopicSpec) (func(any) error, error) {
+func (b *inproc) Publisher(spec TopicSpec) (func(any, Metadata) error, error) {
 	b.mu.Lock()
 	b.pubs[spec.Topic] = append(b.pubs[spec.Topic], spec.Node)
 	b.mu.Unlock()
-	return func(msg any) error {
+	return func(msg any, md Metadata) error {
 		b.mu.RLock()
 		subs := b.subs[spec.Topic]
 		b.mu.RUnlock()
 		for _, deliver := range subs {
-			deliver(msg)
+			deliver(msg, md)
 		}
 		return nil
 	}, nil
 }
 
-func (b *inproc) Subscribe(spec TopicSpec, deliver func(any)) error {
+func (b *inproc) Subscribe(spec TopicSpec, deliver func(any, Metadata)) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.subs[spec.Topic] = append(b.subs[spec.Topic], deliver)

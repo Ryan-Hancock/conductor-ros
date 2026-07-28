@@ -42,6 +42,7 @@ func (s *Svc[Req, Res]) bind(rt *runtimeState, nr *nodeRuntime, field reflect.St
 		ResType: reflect.TypeFor[Res](),
 		Node:    nr.name,
 	}
+	rt.recordProvides(nr.name, service)
 	handle := func(req any) (any, error) {
 		type result struct {
 			res Res
@@ -49,13 +50,20 @@ func (s *Svc[Req, Res]) bind(rt *runtimeState, nr *nodeRuntime, field reflect.St
 		}
 		ch := make(chan result, 1)
 		if !nr.enqueue(func() {
-			res, err := h(req.(Req))
-			ch <- result{res, err}
+			nr.runInstrumented(SpanService, service, TraceContext{}, func() {
+				res, err := h(req.(Req))
+				ch <- result{res, err}
+			})
 		}) {
 			return nil, fmt.Errorf("service %q: node %s is not accepting work (shutting down or mailbox full)", service, nr.name)
 		}
 		select {
 		case r := <-ch:
+			outcome := "ok"
+			if r.err != nil {
+				outcome = "error"
+			}
+			counter("conductor_service_requests_total", "node", nr.name, "service", service, "outcome", outcome).Add(1)
 			if r.err != nil {
 				return nil, r.err
 			}

@@ -107,3 +107,41 @@ func DecodeAttachment(b []byte) (seq, timestampNS int64, gid []byte, err error) 
 	}
 	return seq, timestampNS, b[17 : 17+n], nil
 }
+
+// TraceMagic marks conductor's trace-context extension, appended after the
+// fields rmw_zenoh defines. rmw's deserializer reads its three fields in
+// order and ignores whatever follows, so extended attachments stay readable
+// by ordinary ROS 2 nodes (verified against live rmw_zenoh traffic).
+var TraceMagic = [4]byte{'C', 'D', 'T', 'R'}
+
+// TraceExtensionLen is the size of the appended extension: magic, 16-byte
+// trace id, 8-byte span id, one flags byte.
+const TraceExtensionLen = 4 + 16 + 8 + 1
+
+// AppendTraceContext appends conductor's trace extension to an attachment.
+func AppendTraceContext(att []byte, traceID [16]byte, spanID [8]byte, sampled bool) []byte {
+	out := append(att, TraceMagic[:]...)
+	out = append(out, traceID[:]...)
+	out = append(out, spanID[:]...)
+	flags := byte(0)
+	if sampled {
+		flags = 1
+	}
+	return append(out, flags)
+}
+
+// ExtractTraceContext reads a trace extension from an attachment, reporting
+// whether one was present. Attachments from non-conductor publishers simply
+// have no extension.
+func ExtractTraceContext(att []byte) (traceID [16]byte, spanID [8]byte, sampled, ok bool) {
+	if len(att) < TraceExtensionLen {
+		return traceID, spanID, false, false
+	}
+	ext := att[len(att)-TraceExtensionLen:]
+	if [4]byte(ext[:4]) != TraceMagic {
+		return traceID, spanID, false, false
+	}
+	copy(traceID[:], ext[4:20])
+	copy(spanID[:], ext[20:28])
+	return traceID, spanID, ext[28] == 1, true
+}

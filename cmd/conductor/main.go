@@ -148,6 +148,14 @@ func printReport(app *scan.App, g *graph.Graph, issues []graph.Issue) {
 		}
 	}
 
+	order, cycles := g.BringupOrder()
+	if len(order) > 1 {
+		fmt.Printf("\nbringup order (derived from the graph):\n  %s\n", strings.Join(order, " -> "))
+		if len(cycles) > 0 {
+			fmt.Printf("  note: %s form a dependency cycle and start in declaration order\n", strings.Join(cycles, ", "))
+		}
+	}
+
 	nErr, nWarn := 0, 0
 	if len(issues) > 0 {
 		fmt.Println("\nissues:")

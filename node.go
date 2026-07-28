@@ -1,6 +1,9 @@
 package conductor
 
-import "sync/atomic"
+import (
+	"sync/atomic"
+	"time"
+)
 
 // nodeRuntime is the executor for one node: a mailbox drained by a single
 // goroutine, so node callbacks never run concurrently and node-local state
@@ -13,6 +16,30 @@ type nodeRuntime struct {
 	done      chan struct{}
 	processed atomic.Uint64
 	dropped   atomic.Uint64
+	lifecycle *lifecycle
+
+	// currentTrace is the trace context of the callback the executor is
+	// running, so messages published from inside a callback become children
+	// of it. Only ever touched from the executor goroutine, which is
+	// single-threaded by construction.
+	currentTrace TraceContext
+}
+
+// runInstrumented executes a callback on the executor with a span and
+// metrics around it, exposing its trace context to anything the callback
+// publishes.
+func (nr *nodeRuntime) runInstrumented(kind SpanKind, name string, parent TraceContext, fn func()) {
+	start := time.Now()
+	var span *Span
+	if tracingEnabled() {
+		span = startSpan(nr.name, kind, name, parent)
+		nr.currentTrace = span.Context
+	}
+	fn()
+	nr.currentTrace = TraceContext{}
+	span.finish(nil)
+	observe("conductor_callback_duration", time.Since(start),
+		"node", nr.name, "kind", string(kind), "name", name)
 }
 
 func newNodeRuntime(name string) *nodeRuntime {
@@ -22,6 +49,12 @@ func newNodeRuntime(name string) *nodeRuntime {
 		quit:    make(chan struct{}),
 		done:    make(chan struct{}),
 	}
+}
+
+// active reports whether the node is in the Active lifecycle state, and so
+// whether its timers, publishers, and subscription handlers should run.
+func (nr *nodeRuntime) active() bool {
+	return nr.lifecycle == nil || nr.lifecycle.active()
 }
 
 // enqueue submits fn to the node's executor, reporting whether it was

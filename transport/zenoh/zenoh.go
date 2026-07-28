@@ -93,7 +93,7 @@ func (t *transport) endpointIDs(node string) (nid, eid int) {
 	return nid, eid
 }
 
-func (t *transport) Publisher(spec conductor.TopicSpec) (func(any) error, error) {
+func (t *transport) Publisher(spec conductor.TopicSpec) (func(any, conductor.Metadata) error, error) {
 	info, ok := conductor.MessageInfoOf(spec.Type)
 	if !ok {
 		return nil, fmt.Errorf("message type %s is not registered; call conductor.RegisterMessage", spec.Type)
@@ -122,19 +122,22 @@ func (t *transport) Publisher(spec conductor.TopicSpec) (func(any) error, error)
 		return nil, err
 	}
 	var seq atomic.Int64
-	return func(msg any) error {
+	return func(msg any, md conductor.Metadata) error {
 		payload, err := cdr.Marshal(msg)
 		if err != nil {
 			return err
 		}
 		att := rmwzenoh.EncodeAttachment(seq.Add(1), time.Now().UnixNano(), gid[:])
+		if md.Trace.Valid() {
+			att = rmwzenoh.AppendTraceContext(att, md.Trace.TraceID, md.Trace.SpanID, md.Trace.Sampled)
+		}
 		return pub.Put(zgo.NewZBytes(payload), &zgo.PublisherPutOptions{
 			Attachement: option.Some(zgo.NewZBytes(att)),
 		})
 	}, nil
 }
 
-func (t *transport) Subscribe(spec conductor.TopicSpec, deliver func(any)) error {
+func (t *transport) Subscribe(spec conductor.TopicSpec, deliver func(any, conductor.Metadata)) error {
 	info, ok := conductor.MessageInfoOf(spec.Type)
 	if !ok {
 		return fmt.Errorf("message type %s is not registered; call conductor.RegisterMessage", spec.Type)
@@ -151,7 +154,13 @@ func (t *transport) Subscribe(spec conductor.TopicSpec, deliver func(any)) error
 			slog.Warn("conductor/zenoh: dropping undecodable message", "topic", topic, "err", err)
 			return
 		}
-		deliver(ptr.Elem().Interface())
+		var md conductor.Metadata
+		if att := s.Attachement(); att.IsSome() {
+			if traceID, spanID, sampled, ok := rmwzenoh.ExtractTraceContext(att.Unwrap().Bytes()); ok {
+				md.Trace = conductor.TraceContext{TraceID: traceID, SpanID: spanID, Sampled: sampled}
+			}
+		}
+		deliver(ptr.Elem().Interface(), md)
 	}}, nil)
 	if err != nil {
 		return err

@@ -200,6 +200,7 @@ func (c *ActionClient[G, F, R]) bind(rt *runtimeState, nr *nodeRuntime, field re
 	c.name = name
 	c.timeout = timeout
 	c.pending = map[uuidMsg]chan F{}
+	rt.recordConsumes(nr.name, name)
 	base := name + "/_action/"
 
 	clients := []struct {
@@ -231,7 +232,7 @@ func (c *ActionClient[G, F, R]) bind(rt *runtimeState, nr *nodeRuntime, field re
 	return rt.transport.Subscribe(TopicSpec{
 		Topic: base + "feedback", QoS: reliableQoS,
 		Type: reflect.TypeFor[feedbackMessage[F]](), Node: nr.name,
-	}, func(m any) {
+	}, func(m any, _ Metadata) {
 		msg, ok := m.(feedbackMessage[F])
 		if !ok {
 			return

@@ -59,6 +59,7 @@ func (c *Client[Req, Res]) bind(rt *runtimeState, nr *nodeRuntime, field reflect
 		Node:    nr.name,
 		Timeout: timeout,
 	}
+	rt.recordConsumes(nr.name, service)
 	call, err := rt.transport.ServiceClient(spec)
 	if err != nil {
 		return err

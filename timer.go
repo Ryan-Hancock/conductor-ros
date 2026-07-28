@@ -40,7 +40,12 @@ func (t *Timer) bind(rt *runtimeState, nr *nodeRuntime, field reflect.StructFiel
 		return fmt.Errorf("On%s must have signature func()", field.Name)
 	}
 	t.period = period
-	rt.timers = append(rt.timers, &timerHandle{period: period, node: nr, fire: h})
+	name := field.Name
+	fire := func() {
+		// A timer starts a fresh trace: nothing caused it but the clock.
+		nr.runInstrumented(SpanTimer, name, TraceContext{}, h)
+	}
+	rt.timers = append(rt.timers, &timerHandle{period: period, node: nr, fire: fire})
 	return nil
 }
 
@@ -81,7 +86,10 @@ func (th *timerHandle) start() {
 			case <-th.stop:
 				return
 			case <-t.C:
-				th.node.enqueue(th.fire)
+				// Timers only fire while the node is active.
+				if th.node.active() {
+					th.node.enqueue(th.fire)
+				}
 			}
 		}
 	}()

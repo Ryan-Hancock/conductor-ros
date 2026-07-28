@@ -129,7 +129,8 @@ native dependencies.
 
 Define interfaces as plain ROS `.msg` files and generate Go from them —
 including the REP-2011 RIHS01 type hash, which conductor computes itself
-(validated against all 284 message types of a ROS 2 Lyrical install):
+(validated against all 692 message, service, and action types of a ROS 2
+Lyrical install):
 
 ```sh
 conductor msggen -out examples/patrol -pkg main -ros-pkg patrol_msgs examples/patrol/msg
@@ -217,17 +218,82 @@ both a conductor server and an rclpy server. See
 [examples/fibonacci](examples/fibonacci/main.go) (server) and
 [examples/mission](examples/mission/main.go) (client).
 
+## Lifecycle and bringup order
+
+Every conductor node is a ROS 2 managed node: it exposes `change_state`,
+`get_state`, `get_available_states`, `get_available_transitions` and the
+`transition_event` topic, so `ros2 lifecycle` drives it like any other.
+Nodes may implement any subset of the hooks, each running on the node's
+executor:
+
+```go
+func (n *Navigator) OnConfigure() error { ... }   // also OnActivate, OnDeactivate,
+func (n *Navigator) OnActivate() error  { ... }   // OnCleanup, OnShutdown
+```
+
+While a node is not active its timers stop, its publishers drop messages,
+and its subscription handlers are not invoked — what the managed-node design
+prescribes, enforced by the framework rather than by convention.
+
+**The bringup order is derived, not hand-written.** Conductor knows the whole
+graph, so it knows a navigator consuming `/amcl_pose` must come up after the
+localizer that publishes it. `conductor check` reports the order, the
+generated launch file encodes it, and `Run` follows it at startup:
+
+```
+bringup order (derived from the graph):
+  localizer -> navigator -> safety_monitor
+```
+
+Cycles are normal in robotics, so nodes in one are reported and started in
+declaration order rather than treated as an error. `-lifecycle manual` skips
+auto-activation entirely and waits for an external orchestrator.
+
+## Observability
+
+A ROS graph is a causal chain, but nothing in the ecosystem records it — so
+"why did the robot stop 200 ms after that lidar frame?" is normally answered
+by correlating log timestamps by hand. Conductor gives every callback a span
+and **propagates trace context along the messages themselves**:
+
+```
+$ ./patrol -transport zenoh -trace
+span trace=5f86…3346 span=4fd7…f8f6 parent=0000…0000 node=localizer      kind=timer        name=Clock
+span trace=5f86…3346 span=4d29…28b2 parent=4fd7…f8f6 node=navigator      kind=subscription name=amcl_pose
+span trace=5f86…3346 span=59e4…2b80 parent=4d29…28b2 node=safety_monitor kind=subscription name=cmd_vel
+```
+
+One trace id, correctly chained parents, across three nodes and (over zenoh)
+across processes. Propagation is automatic: anything published from inside a
+callback becomes a child of it. Trace context rides in an extension appended
+to the rmw_zenoh attachment, after the fields rmw defines — ordinary ROS 2
+nodes ignore it, verified by `ros2 topic echo` reading traced messages
+unchanged. IDs are W3C trace-context, so `Span.Context.Traceparent()` feeds
+OpenTelemetry directly; implement `Exporter` to ship spans anywhere.
+
+Metrics come free too, in Prometheus format, with no user code:
+
+```sh
+./patrol -transport zenoh -metrics-addr :9095   # then curl localhost:9095/metrics
+conductor_messages_published_total{node="localizer",topic="amcl_pose"} 20
+conductor_callback_duration_count{node="navigator",kind="subscription",name="amcl_pose"} 20
+conductor_callback_duration_sum_seconds{node="navigator",kind="subscription",name="amcl_pose"} 0.000514
+conductor_node_lifecycle_state{node="navigator"} 3
+```
+
 ## Status
 
-v0.6 — the static toolchain (scan → validate → generate) works; the runtime
+v0.8 — the static toolchain (scan → validate → generate) works; the runtime
 executes nodes over a pluggable transport: in-process bus by default, or
 Zenoh/rmw_zenoh to join a live ROS 2 graph (see above). CDR serialization is
 pure Go, byte-verified against rclpy; `.msg`/`.srv`/`.action` codegen
 computes RIHS01 hashes locally (validated 692/692 against a full distro).
 Topics, services, and actions all work in both directions, on both
-transports, verified against real ROS 2 by `.tools/interop.sh`. Not yet
-done: lifecycle orchestration, transient-local latching, per-environment
-config, and OpenTelemetry integration. See [DESIGN.md](DESIGN.md).
+transports; every node is a managed node with graph-derived bringup order;
+and tracing and metrics are built in. `.tools/interop.sh` checks all eleven
+legs against real ROS 2. Not yet done: transient-local latching,
+per-environment config, multi-instance node namespacing, and `conductor
+deploy`. See [DESIGN.md](DESIGN.md).
 
 ## Layout
 

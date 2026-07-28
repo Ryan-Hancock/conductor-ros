@@ -40,16 +40,12 @@ func (c *Counter2) OnCount(g *Goal[countGoal, countFeedback]) (countResult, erro
 // driveAction exercises the full wire protocol through the transport
 // interface, exactly as a remote action client would.
 func TestActionLifecycle(t *testing.T) {
-	a, err := newApp("inproc", TransportOptions{}, "", &Counter2{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer a.stop()
+	a := newTestApp(t, &Counter2{})
 	tr := a.rt.transport
 
 	var feedbacks atomic.Int64
 	fbSpec := TopicSpec{Topic: "count/_action/feedback", Type: nil, Node: "test"}
-	if err := tr.Subscribe(fbSpec, func(m any) {
+	if err := tr.Subscribe(fbSpec, func(m any, _ Metadata) {
 		if _, ok := m.(feedbackMessage[countFeedback]); ok {
 			feedbacks.Add(1)
 		}
@@ -131,11 +127,7 @@ type Driver2 struct {
 // would speak.
 func TestActionClientRoundTrip(t *testing.T) {
 	drv := &Driver2{}
-	a, err := newApp("inproc", TransportOptions{}, "", &Counter2{}, drv)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer a.stop()
+	newTestApp(t, &Counter2{}, drv)
 
 	h, err := drv.Count.SendGoal(countGoal{Target: 4})
 	if err != nil {
@@ -177,11 +169,7 @@ func TestActionClientRoundTrip(t *testing.T) {
 
 func TestActionClientCancel(t *testing.T) {
 	drv := &Driver2{}
-	a, err := newApp("inproc", TransportOptions{}, "", &Counter2{}, drv)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer a.stop()
+	newTestApp(t, &Counter2{}, drv)
 
 	h, err := drv.Count.SendGoal(countGoal{Target: 10000})
 	if err != nil {

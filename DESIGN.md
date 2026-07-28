@@ -162,27 +162,44 @@ consolidation explicitly, with a comment) are the exact places bugs hide.
 | Timers/watchdogs | hand-written | `Timer` fields | ✅ v0.1 |
 | Message interop | .msg packages + CMake | CDR codec; `.msg` → Go codegen with local RIHS01 hash computation (validated against the full distro corpus) | ✅ v0.3 |
 | Live ROS graph | — | Zenoh transport, rmw_zenoh wire-compatible | ✅ v0.2 |
-| Lifecycle + startup ordering | unused spec, `wait_for_service` loops | generated lifecycle nodes, bringup order derived from graph | v0.4 |
+| Lifecycle + startup ordering | unused spec, `wait_for_service` loops | every node is a managed node; hooks by convention; timers/publishers/subscriptions gated on Active; bringup order derived from the graph (runtime, `check`, and generated launch) | ✅ v0.7 |
 | Services | boilerplate | `Svc[Req,Res]` / `Client[Req,Res]` fields, graph-validated, rmw_zenoh querier/queryable wire format, `.srv` codegen | ✅ v0.4 |
 | Actions (server) | boilerplate | `Action[G,F,R]` fields over the 3-service/2-topic convention; goal state machine, per-goal goroutines, context cancellation; `.action` codegen | ✅ v0.5 |
 | Actions (client, e.g. calling Nav2) | boilerplate | `ActionClient[G,F,R]` with goal handles, feedback channels, cancellation | ✅ v0.6 |
-| Observability | `/rosout` + prayer | OTel traces w/ per-message correlation IDs, Prometheus metrics per node/topic | v0.5 |
+| Observability | `/rosout` + prayer | a span per callback with W3C trace context propagated through messages; Prometheus metrics per node/topic/callback | ✅ v0.8 |
 | Testing | `launch_testing` | mocked-topic unit tests, rosbag-fixture replay, sim-in-CI scenario runs | v0.5 |
 | Deployment | colcon + rosdep + apt | cross-compiled static binary, `conductor deploy` | v0.6 |
 | Per-env config (sim/dev/robot-N) | copy-pasted YAML | environment overlays for params/externals | v0.6 |
 | Task orchestration (state machines/BTs) | XML/hand-rolled | declarative mission layer | v1.0 |
 | TF conventions | boilerplate | declared static transforms, frame checks in graph | v1.0 |
 
-## Observability sketch (v0.5)
+## Observability (v0.8, implemented)
 
-The runtime owns every callback invocation, so it can wrap all of them:
+The runtime owns every callback invocation, so it wraps all of them.
 
-- a correlation ID injected at first publish and propagated through every
-  downstream callback → distributed traces of a message's path across nodes,
-  Encore-style, which nothing in the ROS ecosystem provides;
-- per-node/per-topic counters (already present in v0.1 as processed/dropped
-  stats) exported as Prometheus metrics;
-- structured logs (slog) with node/topic attributes for free.
+**Tracing.** Each callback gets a span. The hard part is causal propagation,
+and the trick that makes it invisible to users is the executor: a node runs
+its callbacks on exactly one goroutine, so the runtime can park the current
+span's context on the node while a callback runs, and any `Publish` from
+inside that callback picks it up. No `context.Context` threading, no changes
+to handler signatures.
+
+Trace context crosses processes in an extension appended to the rmw_zenoh
+attachment (magic `CDTR`, 16-byte trace id, 8-byte span id, flags). This is
+safe because rmw's deserializer reads its three fields positionally and
+ignores trailing bytes — confirmed in its source and then on the wire, with
+`ros2 topic echo` reading traced messages unchanged. IDs follow W3C
+trace-context so `Traceparent()` drops straight into OpenTelemetry; the
+`Exporter` interface keeps the OTel SDK out of the dependency list.
+
+Known gap: action handlers run on a goroutine per goal rather than the
+executor, so they start a fresh trace rather than continuing the caller's.
+
+**Metrics.** A small built-in registry exposed in Prometheus text format on
+an optional HTTP endpoint — no client library dependency, since the
+exposition format is a few lines to write. Message counts, callback
+latency sums, service outcomes, and lifecycle state per node, all with no
+user code.
 
 ## Non-goals
 

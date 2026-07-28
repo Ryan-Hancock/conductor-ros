@@ -362,6 +362,107 @@ func Validate(app *scan.App) (*Graph, []Issue) {
 	return g, issues
 }
 
+// BringupOrder derives the activation order for the application's nodes: a
+// node follows every node it consumes from (topic publisher, service or
+// action server). This is the static mirror of the runtime's ordering, and
+// what `conductor check` reports and the generated launch file encodes.
+// Cycles are normal in robotics, so nodes in one are appended in declaration
+// order and named in cycles.
+func (g *Graph) BringupOrder() (order []string, cycles []string) {
+	names := make([]string, len(g.App.Nodes))
+	for i, n := range g.App.Nodes {
+		names[i] = n.Name
+	}
+	// providers maps an endpoint name to the nodes providing it.
+	providers := map[string][]string{}
+	for _, t := range g.Topics {
+		for _, p := range t.Pubs {
+			if !p.External {
+				providers[t.Name] = append(providers[t.Name], p.Node)
+			}
+		}
+	}
+	for _, s := range g.Services {
+		for _, sv := range s.Servers {
+			if !sv.External {
+				providers[s.Name] = append(providers[s.Name], sv.Node)
+			}
+		}
+	}
+	for _, a := range g.Actions {
+		for _, sv := range a.Servers {
+			if !sv.External {
+				providers[a.Name] = append(providers[a.Name], sv.Node)
+			}
+		}
+	}
+
+	consumes := map[string][]string{}
+	for _, n := range g.App.Nodes {
+		for _, s := range n.Subs {
+			consumes[n.Name] = append(consumes[n.Name], s.Topic)
+		}
+		for _, c := range n.Clients {
+			consumes[n.Name] = append(consumes[n.Name], c.Service)
+		}
+		for _, c := range n.ActionClients {
+			consumes[n.Name] = append(consumes[n.Name], c.Action)
+		}
+	}
+
+	position := map[string]int{}
+	for i, n := range names {
+		position[n] = i
+	}
+	needs := map[string]map[string]bool{}
+	indegree := map[string]int{}
+	for _, n := range names {
+		needs[n] = map[string]bool{}
+	}
+	for _, n := range names {
+		for _, endpoint := range consumes[n] {
+			for _, provider := range providers[endpoint] {
+				if provider == n || needs[n][provider] {
+					continue
+				}
+				needs[n][provider] = true
+				indegree[n]++
+			}
+		}
+	}
+
+	var ready []string
+	for _, n := range names {
+		if indegree[n] == 0 {
+			ready = append(ready, n)
+		}
+	}
+	done := map[string]bool{}
+	for len(ready) > 0 {
+		sort.Slice(ready, func(i, j int) bool { return position[ready[i]] < position[ready[j]] })
+		n := ready[0]
+		ready = ready[1:]
+		order = append(order, n)
+		done[n] = true
+		for _, other := range names {
+			if done[other] || !needs[other][n] {
+				continue
+			}
+			indegree[other]--
+			if indegree[other] == 0 {
+				ready = append(ready, other)
+			}
+		}
+	}
+	for _, n := range names {
+		if !done[n] {
+			cycles = append(cycles, n)
+			order = append(order, n)
+		}
+	}
+	return order, cycles
+}
+
 func allInternalSvc(eps []SvcEndpoint) bool {
 	for _, e := range eps {
 		if e.External {

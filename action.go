@@ -72,6 +72,7 @@ func (a *Action[G, F, R]) bind(rt *runtimeState, nr *nodeRuntime, field reflect.
 	registerServiceTypes(reflect.TypeFor[sendGoalRequest[G]](), reflect.TypeFor[sendGoalResponse](), info.SendGoal)
 	registerServiceTypes(reflect.TypeFor[getResultRequest](), reflect.TypeFor[getResultResponse[R]](), info.GetResult)
 
+	rt.recordProvides(nr.name, name)
 	srv := &actionServer[G, F, R]{
 		action:  name,
 		handler: h,
@@ -131,8 +132,8 @@ func (r *goalRecord[R]) terminal() bool {
 type actionServer[G, F, R any] struct {
 	action      string
 	handler     func(*Goal[G, F]) (R, error)
-	statusPub   func(any) error
-	feedbackPub func(any) error
+	statusPub   func(any, Metadata) error
+	feedbackPub func(any, Metadata) error
 
 	mu    sync.Mutex
 	goals map[uuidMsg]*goalRecord[R]
@@ -161,7 +162,7 @@ func (s *actionServer[G, F, R]) handleSendGoal(reqAny any) (any, error) {
 		goal: req.Goal,
 		ctx:  ctx,
 		sendFeedback: func(f F) {
-			if err := s.feedbackPub(feedbackMessage[F]{GoalId: req.GoalId, Feedback: f}); err != nil {
+			if err := s.feedbackPub(feedbackMessage[F]{GoalId: req.GoalId, Feedback: f}, Metadata{}); err != nil {
 				slog.Warn("conductor: feedback publish failed", "action", s.action, "err", err)
 			}
 		},
@@ -247,7 +248,7 @@ func (s *actionServer[G, F, R]) publishStatus() {
 		arr.StatusList = append(arr.StatusList, goalStatusMsg{GoalInfo: rec.info, Status: rec.status})
 	}
 	s.mu.Unlock()
-	if err := s.statusPub(arr); err != nil {
+	if err := s.statusPub(arr, Metadata{}); err != nil {
 		slog.Warn("conductor: status publish failed", "action", s.action, "err", err)
 	}
 }

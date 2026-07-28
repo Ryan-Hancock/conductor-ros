@@ -27,14 +27,25 @@ type Counter struct {
 
 func (c *Counter) OnIn(m ping) { c.n.Add(int64(m.V)) }
 
-func TestPubSubDelivery(t *testing.T) {
-	c := &Counter{}
-	a, err := newApp("inproc", TransportOptions{}, "", &Pinger{}, c)
+// newTestApp wires nodes on the in-process transport and brings them up,
+// the state Run leaves an application in.
+func newTestApp(t *testing.T, nodes ...any) *app {
+	t.Helper()
+	a, err := newApp("inproc", TransportOptions{}, "", nodes...)
 	if err != nil {
 		t.Fatal(err)
 	}
+	if err := a.bringUp(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(a.stop)
+	return a
+}
+
+func TestPubSubDelivery(t *testing.T) {
+	c := &Counter{}
+	newTestApp(t, &Pinger{}, c)
 	time.Sleep(100 * time.Millisecond)
-	a.stop()
 	if c.n.Load() == 0 {
 		t.Fatal("no messages delivered")
 	}
@@ -59,11 +70,7 @@ type Tuned struct {
 
 func TestParamDefaults(t *testing.T) {
 	n := &Tuned{}
-	a, err := newApp("inproc", TransportOptions{}, "", n)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer a.stop()
+	newTestApp(t, n)
 	if got := n.MaxSpeed.Get(); got != 1.5 {
 		t.Errorf("MaxSpeed = %v, want 1.5", got)
 	}
@@ -117,11 +124,7 @@ type EchoCaller struct {
 
 func TestServiceRoundTrip(t *testing.T) {
 	caller := &EchoCaller{}
-	a, err := newApp("inproc", TransportOptions{}, "", &EchoServer{}, caller)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer a.stop()
+	newTestApp(t, &EchoServer{}, caller)
 
 	res, err := caller.Echo.Call(ping{V: 41})
 	if err != nil {
@@ -138,11 +141,7 @@ func TestServiceRoundTrip(t *testing.T) {
 
 func TestServiceNoServer(t *testing.T) {
 	caller := &EchoCaller{}
-	a, err := newApp("inproc", TransportOptions{}, "", caller)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer a.stop()
+	newTestApp(t, caller)
 	if _, err := caller.Echo.Call(ping{}); err == nil || !strings.Contains(err.Error(), "no in-process server") {
 		t.Fatalf("expected no-server error, got %v", err)
 	}

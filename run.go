@@ -1,9 +1,11 @@
 package conductor
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"os"
 	"os/signal"
 	"reflect"
@@ -18,6 +20,7 @@ type runtimeState struct {
 	transport Transport
 	nodes     []*nodeRuntime
 	timers    []*timerHandle
+	deps      map[string]*nodeDeps
 }
 
 // binder is implemented by the framework field types (Sub, Pub, Param, Timer);
@@ -35,18 +38,45 @@ type binder interface {
 //	-transport <name>       message transport: inproc (default) or zenoh
 //	-zenoh-endpoint <ep>    zenoh router endpoint (default tcp/127.0.0.1:7447)
 //	-domain <id>            ROS domain id (default $ROS_DOMAIN_ID or 0)
+//	-lifecycle <mode>       auto (default: configure and activate nodes in
+//	                        dependency order at startup) or manual (leave
+//	                        them unconfigured for an external orchestrator)
 func Run(nodes ...any) {
 	fs := flag.NewFlagSet("conductor", flag.ExitOnError)
 	only := fs.String("node", "", "run only the named node")
 	transportName := fs.String("transport", "inproc", "message transport (inproc, zenoh)")
 	endpoint := fs.String("zenoh-endpoint", "tcp/127.0.0.1:7447", "zenoh router endpoint")
 	domain := fs.Int("domain", envDomain(), "ROS domain id")
+	lifecycleMode := fs.String("lifecycle", "auto", "lifecycle mode (auto, manual)")
+	metricsAddr := fs.String("metrics-addr", "", "expose Prometheus metrics on this address (e.g. :9090)")
+	traceLog := fs.Bool("trace", false, "log a span for every callback, with W3C trace context")
 	fs.Parse(os.Args[1:])
+
+	if *traceLog {
+		AddExporter(LogExporter{})
+	}
+
+	if *lifecycleMode != "auto" && *lifecycleMode != "manual" {
+		slog.Error("conductor: invalid -lifecycle mode (want auto or manual)", "mode", *lifecycleMode)
+		os.Exit(1)
+	}
 
 	a, err := newApp(*transportName, TransportOptions{Endpoint: *endpoint, Domain: *domain}, *only, nodes...)
 	if err != nil {
 		slog.Error("conductor: startup failed", "err", err)
 		os.Exit(1)
+	}
+	if *lifecycleMode == "auto" {
+		if err := a.bringUp(); err != nil {
+			slog.Error("conductor: bringup failed", "err", err)
+			a.stop()
+			os.Exit(1)
+		}
+	} else {
+		slog.Info("conductor: lifecycle manual, nodes are unconfigured until told otherwise")
+	}
+	if *metricsAddr != "" {
+		a.metrics = serveMetrics(*metricsAddr)
 	}
 	a.startStats(2 * time.Second)
 	names := make([]string, len(a.rt.nodes))
@@ -79,6 +109,7 @@ type app struct {
 	rt        *runtimeState
 	statsQuit chan struct{}
 	statsDone chan struct{}
+	metrics   *http.Server
 }
 
 func newApp(transportName string, topts TransportOptions, only string, nodeStructs ...any) (*app, error) {
@@ -102,6 +133,12 @@ func newApp(transportName string, topts TransportOptions, only string, nodeStruc
 			return nil, fmt.Errorf("%s: %w", t.Name(), err)
 		}
 		nr := newNodeRuntime(name)
+		hooks, err := findHooks(ptr)
+		if err != nil {
+			return nil, fmt.Errorf("%s: %w", t.Name(), err)
+		}
+		nr.lifecycle = newLifecycle(nr, hooks)
+		rt.depsFor(name) // ensure every node appears in the dependency graph
 		for i := 0; i < t.NumField(); i++ {
 			f := t.Field(i)
 			if !f.IsExported() {
@@ -114,6 +151,9 @@ func newApp(transportName string, topts TransportOptions, only string, nodeStruc
 			if err := b.bind(rt, nr, f, ptr); err != nil {
 				return nil, fmt.Errorf("%s.%s: %w", t.Name(), f.Name, err)
 			}
+		}
+		if err := bindLifecycle(rt, nr); err != nil {
+			return nil, fmt.Errorf("%s lifecycle: %w", t.Name(), err)
 		}
 		rt.nodes = append(rt.nodes, nr)
 	}
@@ -131,6 +171,57 @@ func newApp(transportName string, topts TransportOptions, only string, nodeStruc
 		th.start()
 	}
 	return &app{rt: rt}, nil
+}
+
+// bringUp configures and activates every node in dependency order.
+func (a *app) bringUp() error {
+	names := make([]string, len(a.rt.nodes))
+	byName := map[string]*nodeRuntime{}
+	for i, nr := range a.rt.nodes {
+		names[i] = nr.name
+		byName[nr.name] = nr
+	}
+	order, cycles := BringupOrder(names, a.rt.deps)
+	if len(cycles) > 0 {
+		slog.Warn("conductor: dependency cycle, bringing these up in declaration order",
+			"nodes", strings.Join(cycles, ","))
+	}
+	slog.Info("conductor: bringup order", "order", strings.Join(order, " -> "))
+
+	for _, name := range order {
+		nr := byName[name]
+		for _, t := range []Transition{TransitionConfigure, TransitionActivate} {
+			if ok, err := nr.lifecycle.transition(t); !ok {
+				return fmt.Errorf("node %s: %s: %w", name, t, err)
+			}
+		}
+	}
+	return nil
+}
+
+// shutDown drives every node to Finalized, in reverse bringup order so
+// consumers stop before the things they depend on.
+func (a *app) shutDown() {
+	names := make([]string, len(a.rt.nodes))
+	byName := map[string]*nodeRuntime{}
+	for i, nr := range a.rt.nodes {
+		names[i] = nr.name
+		byName[nr.name] = nr
+	}
+	order, _ := BringupOrder(names, a.rt.deps)
+	for i := len(order) - 1; i >= 0; i-- {
+		nr := byName[order[i]]
+		if nr.lifecycle.State() == StateActive {
+			if ok, err := nr.lifecycle.transition(TransitionDeactivate); !ok {
+				slog.Warn("conductor: deactivate failed", "node", nr.name, "err", err)
+			}
+		}
+		if t, ok := shutdownFor(nr.lifecycle.State()); ok {
+			if ok, err := nr.lifecycle.transition(t); !ok {
+				slog.Warn("conductor: shutdown failed", "node", nr.name, "err", err)
+			}
+		}
+	}
 }
 
 func (a *app) startStats(interval time.Duration) {
@@ -158,6 +249,13 @@ func (a *app) stop() {
 	if a.statsQuit != nil {
 		close(a.statsQuit)
 		<-a.statsDone
+	}
+	// Run lifecycle shutdown hooks while the executors are still draining.
+	a.shutDown()
+	if a.metrics != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		a.metrics.Shutdown(ctx)
 	}
 	for _, th := range a.rt.timers {
 		close(th.stop)

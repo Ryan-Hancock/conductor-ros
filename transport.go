@@ -31,6 +31,14 @@ type ServiceSpec struct {
 	Timeout time.Duration
 }
 
+// Metadata travels alongside a message. It carries the trace context that
+// links a publish to the callbacks it causes, so a trace spans the whole
+// path of a message through the graph. Transports that cannot carry it may
+// drop it; traces then start fresh at each hop.
+type Metadata struct {
+	Trace TraceContext
+}
+
 // Transport routes messages between nodes. "inproc" (the default) delivers
 // over an internal bus; other transports register themselves via
 // RegisterTransport from their package's init — e.g. importing
@@ -40,10 +48,10 @@ type Transport interface {
 	// DeclareNode is called once per node, before any of its endpoints.
 	DeclareNode(name string) error
 	// Publisher declares a publisher and returns its publish function.
-	Publisher(spec TopicSpec) (func(msg any) error, error)
+	Publisher(spec TopicSpec) (func(msg any, md Metadata) error, error)
 	// Subscribe declares a subscription. deliver may be called from any
 	// goroutine; the runtime routes it onto the node's executor.
-	Subscribe(spec TopicSpec, deliver func(msg any)) error
+	Subscribe(spec TopicSpec, deliver func(msg any, md Metadata)) error
 	// Serve declares a service server. handle may be called from any
 	// goroutine and blocks until the response is ready (the runtime routes
 	// execution onto the node's executor).

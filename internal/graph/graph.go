@@ -151,12 +151,13 @@ func Build(app *scan.App) *Graph {
 			if a.Action == "" {
 				continue
 			}
-			getAct(a.Action).Servers = append(getAct(a.Action).Servers, SvcEndpoint{
-				Node:    n.Name,
-				ReqType: a.GoalType,
-				ResType: a.ResultType,
-				Pos:     fmt.Sprintf("%s:%d", a.File, a.Line),
-			})
+			getAct(a.Action).Servers = append(getAct(a.Action).Servers, actEndpoint(n, a))
+		}
+		for _, a := range n.ActionClients {
+			if a.Action == "" {
+				continue
+			}
+			getAct(a.Action).Clients = append(getAct(a.Action).Clients, actEndpoint(n, a))
 		}
 	}
 	for _, e := range app.Externals {
@@ -189,6 +190,15 @@ func Build(app *scan.App) *Graph {
 	}
 	sort.Slice(g.Actions, func(i, j int) bool { return g.Actions[i].Name < g.Actions[j].Name })
 	return g
+}
+
+func actEndpoint(n *scan.Node, e scan.ActionEndpoint) SvcEndpoint {
+	return SvcEndpoint{
+		Node:    n.Name,
+		ReqType: e.GoalType,
+		ResType: e.ResultType,
+		Pos:     fmt.Sprintf("%s:%d", e.File, e.Line),
+	}
 }
 
 func svcEndpoint(n *scan.Node, e scan.ServiceEndpoint) SvcEndpoint {

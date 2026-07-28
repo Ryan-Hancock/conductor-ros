@@ -110,6 +110,9 @@ func printReport(app *scan.App, g *graph.Graph, issues []graph.Issue) {
 		for _, a := range n.Actions {
 			fmt.Printf("    act   %-14s goal %s, feedback %s, result %s\n", a.Action, a.GoalType, a.FeedbackType, a.ResultType)
 		}
+		for _, a := range n.ActionClients {
+			fmt.Printf("    send  %-14s goal %s, feedback %s, result %s\n", a.Action, a.GoalType, a.FeedbackType, a.ResultType)
+		}
 		for _, p := range n.Params {
 			def := p.Default
 			if def == "" {

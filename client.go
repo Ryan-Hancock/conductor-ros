@@ -14,8 +14,9 @@ import (
 // handlers: the executor is busy running the handler, so the call can only
 // time out.
 //
-// Tags: service (required), timeout (time.ParseDuration; default 5s — must
-// stay below the transport's own query timeout, 10s on zenoh).
+// Tags: service (required), timeout (time.ParseDuration; default 5s). The
+// timeout is also applied at declaration time on transports that impose
+// their own deadline, so values above zenoh's 10s default work.
 type Client[Req, Res any] struct {
 	service string
 	timeout time.Duration
@@ -56,6 +57,7 @@ func (c *Client[Req, Res]) bind(rt *runtimeState, nr *nodeRuntime, field reflect
 		ReqType: reflect.TypeFor[Req](),
 		ResType: reflect.TypeFor[Res](),
 		Node:    nr.name,
+		Timeout: timeout,
 	}
 	call, err := rt.transport.ServiceClient(spec)
 	if err != nil {

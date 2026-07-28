@@ -122,6 +122,87 @@ func TestActionLifecycle(t *testing.T) {
 	}
 }
 
+type Driver2 struct {
+	Count ActionClient[countGoal, countFeedback, countResult] `action:"count" timeout:"10s"`
+}
+
+// TestActionClientRoundTrip drives a conductor action server with a
+// conductor action client, exercising the same protocol a remote ROS client
+// would speak.
+func TestActionClientRoundTrip(t *testing.T) {
+	drv := &Driver2{}
+	a, err := newApp("inproc", TransportOptions{}, "", &Counter2{}, drv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.stop()
+
+	h, err := drv.Count.SendGoal(countGoal{Target: 4})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(h.ID()) != 32 {
+		t.Errorf("goal id = %q, want 32 hex chars", h.ID())
+	}
+
+	var feedback []int32
+	fbDone := make(chan struct{})
+	go func() {
+		defer close(fbDone)
+		for f := range h.Feedback() {
+			feedback = append(feedback, f.At)
+		}
+	}()
+
+	res, status, err := h.Result()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !status.Succeeded() {
+		t.Fatalf("status = %s, want SUCCEEDED", status)
+	}
+	if res.Reached != 4 {
+		t.Fatalf("reached = %d, want 4", res.Reached)
+	}
+	<-fbDone
+	if len(feedback) == 0 {
+		t.Error("no feedback received")
+	}
+
+	// Result is idempotent.
+	if _, s2, err := h.Result(); err != nil || s2 != status {
+		t.Errorf("second Result() = %s, %v; want %s, nil", s2, err, status)
+	}
+}
+
+func TestActionClientCancel(t *testing.T) {
+	drv := &Driver2{}
+	a, err := newApp("inproc", TransportOptions{}, "", &Counter2{}, drv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.stop()
+
+	h, err := drv.Count.SendGoal(countGoal{Target: 10000})
+	if err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(20 * time.Millisecond)
+	if err := h.Cancel(); err != nil {
+		t.Fatal(err)
+	}
+	res, status, err := h.Result()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status != StatusCanceled {
+		t.Fatalf("status = %s, want CANCELED", status)
+	}
+	if res.Reached == 0 || res.Reached >= 10000 {
+		t.Errorf("partial result = %d, want a partial count", res.Reached)
+	}
+}
+
 type NoActionInfo struct {
 	X Action[ping, ping, ping] `action:"x"`
 }

@@ -91,6 +91,7 @@ go run ./cmd/conductor build examples/patrol # compile + emit gen/ artifacts
 | `conductor.Svc[Req,Res]` + `OnField(Req) (Res, error)` | Service server (`service:"name"`) |
 | `conductor.Client[Req,Res]` + `.Call(req)` | Service client (`service:"name"`, optional `timeout:"3s"`) |
 | `conductor.Action[G,F,R]` + `OnField(*Goal[G,F]) (R, error)` | Action server (`action:"name"`); handler runs one goroutine per goal |
+| `conductor.ActionClient[G,F,R]` + `.SendGoal(g)` | Action client (`action:"name"`, optional `timeout:"60s"`) |
 | `//ros:type pkg/msg/Name` on a struct | Maps a Go message type to its ROS interface |
 | `conductor.json` | App name + topics provided/consumed by external ROS nodes |
 
@@ -189,22 +190,44 @@ Handlers run on a dedicated goroutine per goal (they are long-running by
 nature), with cancellation via the goal context; a non-nil error after
 cancellation reports CANCELED with the partial result, otherwise ABORTED.
 `conductor msggen` parses `.action` files (goal/result/feedback structs, all
-derived-type hashes). Verified live against `ros2 action send_goal
---feedback` (streamed feedback, SUCCEEDED result) and an rclpy client
-cancelling mid-goal (CANCELED with partial result); see
-[examples/fibonacci](examples/fibonacci/main.go). Action *clients* (Go
-calling Nav2) are the next milestone.
+derived-type hashes).
+
+Calling an action — a conductor node driving Nav2, say — is the mirror
+image:
+
+```go
+Fib conductor.ActionClient[FibonacciGoal, FibonacciFeedback, FibonacciResult] `action:"fibonacci" timeout:"60s"`
+
+h, err := m.Fib.SendGoal(FibonacciGoal{Order: 8})   // blocks until accepted
+go func() { for fb := range h.Feedback() { ... } }()
+h.Cancel()                                          // optional
+result, status, err := h.Result()                   // blocks until terminal
+```
+
+`SendGoal` returns `ErrGoalRejected` if the server refuses. `Result` reports
+the terminal status (SUCCEEDED/CANCELED/ABORTED) alongside whatever result
+the server sent, reserving `err` for transport failures. Because these calls
+block, drive them from a goroutine — never directly from an executor
+callback.
+
+Both directions are covered by [`.tools/interop.sh`](.tools/interop.sh),
+which runs conductor against real ROS 2 over rmw_zenoh: `ros2 service call`
+and `ros2 action send_goal` into conductor servers, conductor clients into
+both a conductor server and an rclpy server. See
+[examples/fibonacci](examples/fibonacci/main.go) (server) and
+[examples/mission](examples/mission/main.go) (client).
 
 ## Status
 
-v0.5 — the static toolchain (scan → validate → generate) works; the runtime
+v0.6 — the static toolchain (scan → validate → generate) works; the runtime
 executes nodes over a pluggable transport: in-process bus by default, or
 Zenoh/rmw_zenoh to join a live ROS 2 graph (see above). CDR serialization is
-pure Go, byte-verified against rclpy; `.msg`/`.srv`/`.action` codegen computes RIHS01
-hashes locally (validated 692/692 against a full distro); services and action servers work
-end-to-end on both transports. Not yet done: action clients, lifecycle
-orchestration, transient-local latching, and OpenTelemetry integration. See
-[DESIGN.md](DESIGN.md).
+pure Go, byte-verified against rclpy; `.msg`/`.srv`/`.action` codegen
+computes RIHS01 hashes locally (validated 692/692 against a full distro).
+Topics, services, and actions all work in both directions, on both
+transports, verified against real ROS 2 by `.tools/interop.sh`. Not yet
+done: lifecycle orchestration, transient-local latching, per-environment
+config, and OpenTelemetry integration. See [DESIGN.md](DESIGN.md).
 
 ## Layout
 

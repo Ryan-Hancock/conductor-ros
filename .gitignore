@@ -1,6 +1,8 @@
 gen/
 bin/
 # Local zenoh/rmw_zenoh toolchain (downloaded debs, extracted overlay,
-# prebuilt zenoh-c); keep only the env setup script.
+# prebuilt zenoh-c); keep the scripts, not the downloaded artifacts.
 .tools/*
 !.tools/env.sh
+!.tools/interop.sh
+!.tools/pyfib_server.py

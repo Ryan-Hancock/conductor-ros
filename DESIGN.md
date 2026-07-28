@@ -131,12 +131,25 @@ scratch is deliberately avoided until `.msg` codegen lands.
 
 **C. Pure-Go DDS.** No mature implementation exists; rejected.
 
-Known v0.2 transport limitations: no transient-local latching toward late
-joiners (rmw_zenoh uses advanced publishers with cache for this), publisher
-GIDs are random rather than XXH3-derived from the liveliness keyexpr
-(cosmetic in `ros2 topic info` cross-referencing), and a cgo session rather
-than pure Go (a pure-Go zenoh client would restore the fully-static binary;
-zenoh-pico's protocol subset is a plausible template).
+Known transport limitations: no transient-local latching toward late joiners
+(rmw_zenoh uses advanced publishers with cache for this), publisher GIDs are
+random rather than XXH3-derived from the liveliness keyexpr (cosmetic in
+`ros2 topic info` cross-referencing), and a cgo session rather than pure Go
+(a pure-Go zenoh client would restore the fully-static binary; zenoh-pico's
+protocol subset is a plausible template).
+
+**Interop testing must cover conductor↔conductor, not just conductor↔ROS.**
+The zenoh querier's default consolidation mode (LATEST) deduplicates replies
+by key expression, and since every reply to a ROS service arrives on the one
+service keyexpr, it silently swallowed replies whenever *both* peers were
+conductor processes. Conductor↔rclpy worked in both directions throughout,
+so the bug survived a full milestone undetected; it only surfaced when an
+action client first called an action server that was also conductor.
+`.tools/interop.sh` now runs every leg of that matrix, including the
+same-implementation ones. The general lesson: when reimplementing a wire
+protocol, testing only against the reference implementation leaves the
+diagonal untested, and asymmetries in the reference (rmw_zenoh sets
+consolidation explicitly, with a comment) are the exact places bugs hide.
 
 ## The 80% — repeated ROS patterns and where they land
 
@@ -152,7 +165,7 @@ zenoh-pico's protocol subset is a plausible template).
 | Lifecycle + startup ordering | unused spec, `wait_for_service` loops | generated lifecycle nodes, bringup order derived from graph | v0.4 |
 | Services | boilerplate | `Svc[Req,Res]` / `Client[Req,Res]` fields, graph-validated, rmw_zenoh querier/queryable wire format, `.srv` codegen | ✅ v0.4 |
 | Actions (server) | boilerplate | `Action[G,F,R]` fields over the 3-service/2-topic convention; goal state machine, per-goal goroutines, context cancellation; `.action` codegen | ✅ v0.5 |
-| Actions (client, e.g. calling Nav2) | boilerplate | `ActionClient[G,F,R]` | v0.6 |
+| Actions (client, e.g. calling Nav2) | boilerplate | `ActionClient[G,F,R]` with goal handles, feedback channels, cancellation | ✅ v0.6 |
 | Observability | `/rosout` + prayer | OTel traces w/ per-message correlation IDs, Prometheus metrics per node/topic | v0.5 |
 | Testing | `launch_testing` | mocked-topic unit tests, rosbag-fixture replay, sim-in-CI scenario runs | v0.5 |
 | Deployment | colcon + rosdep + apt | cross-compiled static binary, `conductor deploy` | v0.6 |

@@ -43,7 +43,8 @@ type Node struct {
 	Pubs       []Endpoint
 	Services   []ServiceEndpoint // servers (Svc fields)
 	Clients    []ServiceEndpoint // clients (Client fields)
-	Actions    []ActionEndpoint  // action servers (Action fields)
+	Actions       []ActionEndpoint // action servers (Action fields)
+	ActionClients []ActionEndpoint // action clients (ActionClient fields)
 	Params     []Param
 	Timers     []Timer
 	// Methods maps method name to its signature shape for handler checks.
@@ -327,8 +328,8 @@ func addField(n *Node, pkg string, field *ast.Field, path string, fset *token.Fi
 		} else {
 			n.Clients = append(n.Clients, ep)
 		}
-	case "Action":
-		n.Actions = append(n.Actions, ActionEndpoint{
+	case "Action", "ActionClient":
+		ep := ActionEndpoint{
 			Field:        fname,
 			Action:       tag.Get("action"),
 			GoalType:     qualify(pkg, args[0]),
@@ -336,7 +337,12 @@ func addField(n *Node, pkg string, field *ast.Field, path string, fset *token.Fi
 			ResultType:   qualify(pkg, args[2]),
 			File:         path,
 			Line:         line,
-		})
+		}
+		if kind == "Action" {
+			n.Actions = append(n.Actions, ep)
+		} else {
+			n.ActionClients = append(n.ActionClients, ep)
+		}
 	case "Param":
 		name := tag.Get("name")
 		if name == "" {
@@ -378,8 +384,8 @@ func conductorField(e ast.Expr) (kind string, args []string) {
 		switch {
 		case len(x.Indices) == 2 && (sel.Sel.Name == "Svc" || sel.Sel.Name == "Client"):
 			return sel.Sel.Name, []string{types.ExprString(x.Indices[0]), types.ExprString(x.Indices[1])}
-		case len(x.Indices) == 3 && sel.Sel.Name == "Action":
-			return "Action", []string{types.ExprString(x.Indices[0]), types.ExprString(x.Indices[1]), types.ExprString(x.Indices[2])}
+		case len(x.Indices) == 3 && (sel.Sel.Name == "Action" || sel.Sel.Name == "ActionClient"):
+			return sel.Sel.Name, []string{types.ExprString(x.Indices[0]), types.ExprString(x.Indices[1]), types.ExprString(x.Indices[2])}
 		}
 	case *ast.SelectorExpr:
 		if id, ok := x.X.(*ast.Ident); ok && id.Name == "conductor" && x.Sel.Name == "Timer" {

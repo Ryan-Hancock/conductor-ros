@@ -240,9 +240,22 @@ func (t *transport) ServiceClient(spec conductor.ServiceSpec) (func(any, time.Du
 	if err != nil {
 		return nil, err
 	}
-	querier, err := t.session.DeclareQuerier(ke, &zgo.QuerierOptions{
-		Target: option.Some(zgo.QueryTargetAllComplete),
-	})
+	// Zenoh queriers carry their own deadline (10s by default), which is
+	// shorter than many legitimate calls — an action's get_result blocks for
+	// the whole goal. Honour the declared timeout, with headroom so the
+	// caller's own timeout fires first and reports the better error.
+	// Consolidation must be NONE, matching rmw_zenoh: the default (LATEST)
+	// deduplicates replies by key expression, and since every reply to a ROS
+	// service arrives on the one service keyexpr, it can swallow the reply
+	// outright.
+	opts := &zgo.QuerierOptions{
+		Target:         option.Some(zgo.QueryTargetAllComplete),
+		Consolidataion: option.Some(zgo.NewQueryConsolidataion(zgo.ConsolidationModeNone)),
+	}
+	if spec.Timeout > 0 {
+		opts.TimeoutMs = uint64((spec.Timeout + spec.Timeout/10) / time.Millisecond)
+	}
+	querier, err := t.session.DeclareQuerier(ke, opts)
 	if err != nil {
 		return nil, err
 	}

@@ -24,6 +24,11 @@ type ServiceSpec struct {
 	ReqType reflect.Type
 	ResType reflect.Type
 	Node    string // declaring node's name
+	// Timeout is the longest a call on this client may take. Transports that
+	// impose their own deadline at declaration time (zenoh queriers default
+	// to 10s) must honour it; zero means the transport default. Ignored for
+	// servers.
+	Timeout time.Duration
 }
 
 // Transport routes messages between nodes. "inproc" (the default) delivers

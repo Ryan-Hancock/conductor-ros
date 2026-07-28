@@ -6,7 +6,7 @@
 # which swallowed replies whenever BOTH peers were conductor processes.
 #
 #   ./.tools/interop.sh            run every leg
-#   ./.tools/interop.sh services   run one group (services | actions | lifecycle)
+#   ./.tools/interop.sh services   one group (services | actions | lifecycle | params)
 #
 # Requires a ROS 2 install plus the user-space rmw_zenoh overlay in .tools
 # (see env.sh). Starts and stops its own zenoh router.
@@ -122,6 +122,60 @@ if [[ "$GROUP" == all || "$GROUP" == lifecycle ]]; then
   fi
 
   kill -9 "$lifecycle_pid" 2>/dev/null
+  sleep 1
+fi
+
+if [[ "$GROUP" == all || "$GROUP" == params ]]; then
+  echo "parameters:"
+  # A base file plus a sim overlay: the overlay must win.
+  cat >"$WORK/params.yaml" <<'YAML'
+navigator:
+  ros__parameters:
+    max_speed: 1.5
+YAML
+  cat >"$WORK/params.sim.yaml" <<'YAML'
+navigator:
+  ros__parameters:
+    max_speed: 0.75
+YAML
+  bg "$WORK/params_node.log" "$BIN/patrol" -transport zenoh -params "$WORK/params.yaml" -env sim
+  params_pid="$LAST_PID"
+  sleep 3
+
+  ros2run 25 param list /navigator >"$WORK/p_list.log" 2>&1
+  check "ros2 param list -> conductor node" "$WORK/p_list.log" "max_speed"
+
+  ros2run 25 param get /navigator max_speed >"$WORK/p_get.log" 2>&1
+  check "environment overlay wins over base file" "$WORK/p_get.log" "0.75"
+
+  ros2run 25 param set /navigator max_speed 0.25 >"$WORK/p_set.log" 2>&1
+  check "ros2 param set -> conductor node" "$WORK/p_set.log" "Set parameter successful"
+
+  sleep 1
+  ros2run 25 param get /navigator max_speed >"$WORK/p_get2.log" 2>&1
+  check "value read back after set" "$WORK/p_get2.log" "0.25"
+
+  # The new limit must actually change behaviour, not just the stored value.
+  ros2run 10 topic echo --once /cmd_vel >"$WORK/p_clamp.log" 2>&1
+  if python3 - "$WORK/p_clamp.log" <<'PY'
+import re, sys
+t = open(sys.argv[1]).read()
+xs = re.findall(r'x: (-?[0-9.e-]+)', t)
+ys = re.findall(r'y: (-?[0-9.e-]+)', t)
+sys.exit(0 if xs and ys and (float(xs[0])**2 + float(ys[0])**2) ** 0.5 <= 0.2501 else 1)
+PY
+  then
+    echo "  PASS  new max_speed clamps published velocity"
+    PASS=$((PASS + 1))
+  else
+    echo "  FAIL  new max_speed clamps published velocity"
+    FAIL=$((FAIL + 1))
+  fi
+
+  ros2run 25 param describe /navigator max_speed >"$WORK/p_desc.log" 2>&1
+  check "ros2 param describe reports the type" "$WORK/p_desc.log" "Type: double"
+
+  kill -9 "$params_pid" 2>/dev/null
   sleep 1
 fi
 

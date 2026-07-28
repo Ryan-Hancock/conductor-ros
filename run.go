@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"reflect"
 	"strconv"
 	"strings"
@@ -17,10 +18,11 @@ import (
 )
 
 type runtimeState struct {
-	transport Transport
-	nodes     []*nodeRuntime
-	timers    []*timerHandle
-	deps      map[string]*nodeDeps
+	transport   Transport
+	nodes       []*nodeRuntime
+	timers      []*timerHandle
+	deps        map[string]*nodeDeps
+	paramValues map[string]map[string]string // node name -> parameter -> raw value
 }
 
 // binder is implemented by the framework field types (Sub, Pub, Param, Timer);
@@ -50,7 +52,24 @@ func Run(nodes ...any) {
 	lifecycleMode := fs.String("lifecycle", "auto", "lifecycle mode (auto, manual)")
 	metricsAddr := fs.String("metrics-addr", "", "expose Prometheus metrics on this address (e.g. :9090)")
 	traceLog := fs.Bool("trace", false, "log a span for every callback, with W3C trace context")
+	var paramFiles stringList
+	fs.Var(&paramFiles, "params", "parameter file to load (repeatable; later files win)")
+	env := fs.String("env", "", "environment name: also loads params.<env>.yaml next to the last -params file, or ./params.<env>.yaml")
 	fs.Parse(os.Args[1:])
+
+	files, err := resolveParamFiles(paramFiles, *env)
+	if err != nil {
+		slog.Error("conductor: parameter files", "err", err)
+		os.Exit(1)
+	}
+	values, err := LoadParamFiles(files...)
+	if err != nil {
+		slog.Error("conductor: loading parameters", "err", err)
+		os.Exit(1)
+	}
+	if len(files) > 0 {
+		slog.Info("conductor: loaded parameters", "files", strings.Join(files, ","), "env", *env)
+	}
 
 	if *traceLog {
 		AddExporter(LogExporter{})
@@ -61,7 +80,7 @@ func Run(nodes ...any) {
 		os.Exit(1)
 	}
 
-	a, err := newApp(*transportName, TransportOptions{Endpoint: *endpoint, Domain: *domain}, *only, nodes...)
+	a, err := newAppWithParams(*transportName, TransportOptions{Endpoint: *endpoint, Domain: *domain}, *only, values, nodes...)
 	if err != nil {
 		slog.Error("conductor: startup failed", "err", err)
 		os.Exit(1)
@@ -112,12 +131,50 @@ type app struct {
 	metrics   *http.Server
 }
 
+// stringList collects a repeatable string flag.
+type stringList []string
+
+func (s *stringList) String() string { return strings.Join(*s, ",") }
+
+func (s *stringList) Set(v string) error {
+	*s = append(*s, v)
+	return nil
+}
+
+// resolveParamFiles expands -params and -env into the ordered list of files
+// to load. An environment adds params.<env>.yaml beside the last explicit
+// file (or in the working directory), and it must exist if named.
+func resolveParamFiles(explicit []string, env string) ([]string, error) {
+	files := append([]string{}, explicit...)
+	for _, f := range files {
+		if _, err := os.Stat(f); err != nil {
+			return nil, err
+		}
+	}
+	if env == "" {
+		return files, nil
+	}
+	dir := "."
+	if len(files) > 0 {
+		dir = filepath.Dir(files[len(files)-1])
+	}
+	envFile := filepath.Join(dir, "params."+env+".yaml")
+	if _, err := os.Stat(envFile); err != nil {
+		return nil, fmt.Errorf("environment %q selected but %s is missing", env, envFile)
+	}
+	return append(files, envFile), nil
+}
+
 func newApp(transportName string, topts TransportOptions, only string, nodeStructs ...any) (*app, error) {
+	return newAppWithParams(transportName, topts, only, nil, nodeStructs...)
+}
+
+func newAppWithParams(transportName string, topts TransportOptions, only string, values map[string]map[string]string, nodeStructs ...any) (*app, error) {
 	tr, err := newTransport(transportName, topts)
 	if err != nil {
 		return nil, err
 	}
-	rt := &runtimeState{transport: tr}
+	rt := &runtimeState{transport: tr, paramValues: values}
 	for _, ns := range nodeStructs {
 		ptr := reflect.ValueOf(ns)
 		if ptr.Kind() != reflect.Pointer || ptr.Elem().Kind() != reflect.Struct {
@@ -154,6 +211,9 @@ func newApp(transportName string, topts TransportOptions, only string, nodeStruc
 		}
 		if err := bindLifecycle(rt, nr); err != nil {
 			return nil, fmt.Errorf("%s lifecycle: %w", t.Name(), err)
+		}
+		if err := bindParamServices(rt, nr); err != nil {
+			return nil, fmt.Errorf("%s parameters: %w", t.Name(), err)
 		}
 		rt.nodes = append(rt.nodes, nr)
 	}

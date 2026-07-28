@@ -1,0 +1,37 @@
+{
+  "app": "turtlesim",
+  "externals": [
+    {
+      "topic": "turtle1/pose",
+      "type": "turtlesim_msgs/msg/Pose",
+      "role": "publisher",
+      "qos": "sensor"
+    },
+    {
+      "topic": "turtle1/cmd_vel",
+      "type": "geometry_msgs/msg/Twist",
+      "role": "subscriber",
+      "qos": "reliable"
+    },
+    {
+      "topic": "spawn",
+      "type": "turtlesim_msgs/srv/Spawn",
+      "role": "server"
+    },
+    {
+      "topic": "turtle1/set_pen",
+      "type": "turtlesim_msgs/srv/SetPen",
+      "role": "server"
+    },
+    {
+      "topic": "turtle2/teleport_absolute",
+      "type": "turtlesim_msgs/srv/TeleportAbsolute",
+      "role": "server"
+    },
+    {
+      "topic": "turtle1/rotate_absolute",
+      "type": "turtlesim_msgs/action/RotateAbsolute",
+      "role": "action_server"
+    }
+  ]
+}

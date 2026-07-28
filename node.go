@@ -17,6 +17,7 @@ type nodeRuntime struct {
 	processed atomic.Uint64
 	dropped   atomic.Uint64
 	lifecycle *lifecycle
+	params    []*paramHandle
 
 	// currentTrace is the trace context of the callback the executor is
 	// running, so messages published from inside a callback become children

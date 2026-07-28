@@ -74,7 +74,8 @@ go run ./cmd/conductor build examples/patrol # compile + emit gen/ artifacts
 `conductor build` emits, under `examples/patrol/gen/`:
 
 - `patrol.launch.xml` — a ROS 2 launch file, one process per node
-- `params.yaml` — ROS-style parameter file from the `Param` declarations
+- `params.yaml` — ROS parameter file from the `Param` declarations; feed it
+  back with `-params`, or overlay it per environment
 - `graph.dot` — Graphviz view of the topic graph
 - `bin/patrol` — the compiled app (one static binary; cross-compile with
   `GOOS`/`GOARCH` like any Go program)
@@ -86,7 +87,7 @@ go run ./cmd/conductor build examples/patrol # compile + emit gen/ artifacts
 | `//conductor:node` on a struct | The struct is a node (name: snake_case of the type) |
 | `conductor.Sub[T]` + `OnField(T)` | Subscription with typed handler |
 | `conductor.Pub[T]` | Publisher |
-| `conductor.Param[T]` | Node parameter with default |
+| `conductor.Param[T]` | Node parameter (`default:`, files, live `ros2 param set`) |
 | `conductor.Timer` + `OnField()` | Periodic callback (`rate:"10hz"` or `rate:"250ms"`) |
 | `conductor.Svc[Req,Res]` + `OnField(Req) (Res, error)` | Service server (`service:"name"`) |
 | `conductor.Client[Req,Res]` + `.Call(req)` | Service client (`service:"name"`, optional `timeout:"3s"`) |
@@ -218,6 +219,34 @@ both a conductor server and an rclpy server. See
 [examples/fibonacci](examples/fibonacci/main.go) (server) and
 [examples/mission](examples/mission/main.go) (client).
 
+## Parameters and environments
+
+`Param[T]` values resolve in three layers — the `default` tag, then any
+parameter files, then live updates — and every node exposes the standard ROS
+parameter services, so `ros2 param list/get/set/describe` works against
+conductor nodes:
+
+```sh
+./patrol -transport zenoh -params params.yaml -env sim   # params.sim.yaml overlays params.yaml
+ros2 param set /navigator max_speed 0.25                 # takes effect immediately
+```
+
+`conductor build` emits a `params.yaml` that is a *working* input file, not
+just documentation: pass it back with `-params`, or copy it to
+`params.<env>.yaml` and edit it as a per-environment overlay (sim, dev, one
+per robot). Files are read in order and later ones win, and ROS's `/**`
+wildcard node key is supported.
+
+`Param.Get` is safe from any goroutine and always returns the current value,
+so a `ros2 param set` is picked up by the next callback that reads it —
+verified live: setting `max_speed` to 0.25 clamps the published velocity to
+exactly 0.25. Type changes are refused rather than silently coerced, and
+`set_parameters_atomically` really is all-or-nothing.
+
+Parameter files use the ROS subset (`node: / ros__parameters: / key: value`),
+parsed by conductor itself rather than pulling in a YAML dependency;
+anything outside that shape is a clear error with a file and line.
+
 ## Lifecycle and bringup order
 
 Every conductor node is a ROS 2 managed node: it exposes `change_state`,
@@ -283,17 +312,18 @@ conductor_node_lifecycle_state{node="navigator"} 3
 
 ## Status
 
-v0.8 — the static toolchain (scan → validate → generate) works; the runtime
+v0.9 — the static toolchain (scan → validate → generate) works; the runtime
 executes nodes over a pluggable transport: in-process bus by default, or
 Zenoh/rmw_zenoh to join a live ROS 2 graph (see above). CDR serialization is
 pure Go, byte-verified against rclpy; `.msg`/`.srv`/`.action` codegen
 computes RIHS01 hashes locally (validated 692/692 against a full distro).
-Topics, services, and actions all work in both directions, on both
+Topics, services, and actions all work in both directions on both
 transports; every node is a managed node with graph-derived bringup order;
-and tracing and metrics are built in. `.tools/interop.sh` checks all eleven
-legs against real ROS 2. Not yet done: transient-local latching,
-per-environment config, multi-instance node namespacing, and `conductor
-deploy`. See [DESIGN.md](DESIGN.md).
+parameters load from environment-overlaid files and update live through the
+ROS parameter services; and tracing and metrics are built in.
+`.tools/interop.sh` checks every leg against real ROS 2. Not yet done:
+transient-local latching, per-environment *externals*, multi-instance node
+namespacing, and `conductor deploy`. See [DESIGN.md](DESIGN.md).
 
 ## Layout
 

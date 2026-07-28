@@ -64,8 +64,9 @@ error CND003: node monitor: missing handler method OnEstop (app.go:27)
 ## Try it
 
 ```sh
-go test ./...                                # runtime + scanner + graph tests
+go test ./...                                # runtime + harness + scanner + graph tests
 go run ./cmd/conductor check examples/patrol # validate the example app
+go run ./cmd/conductor test examples/patrol  # validate it, then run its tests
 go run ./cmd/conductor build examples/patrol # compile + emit gen/ artifacts
 ./examples/patrol/gen/bin/patrol             # run all nodes in-process (Ctrl-C to stop)
 ./examples/patrol/gen/bin/patrol -node navigator   # run a single node
@@ -320,6 +321,74 @@ conductor_callback_duration_sum_seconds{node="navigator",kind="subscription",nam
 conductor_node_lifecycle_state{node="navigator"} 3
 ```
 
+## Testing
+
+Testing a ROS application usually means `launch_testing`: bring up real
+nodes, sleep, hope. Conductor owns the wiring, so it can run your whole
+application inside `go test` — real nodes, real handlers, real lifecycle, on
+the in-process transport:
+
+```go
+func TestNavigatorClampsSpeed(t *testing.T) {
+	app := conductortest.RunWith(t, conductortest.Options{
+		Params: map[string]map[string]string{"navigator": {"max_speed": "0.25"}},
+	}, &Navigator{goal: msgs.Point{X: 50, Y: 40}})
+
+	cmd := conductortest.Watch[msgs.Twist](app, "cmd_vel")
+	conductortest.Publish(app, "amcl_pose", poseAt(0, 0))
+
+	got, _ := cmd.Last()
+	if speed(got) != 0.25 {
+		t.Fatalf("speed %v, want the parameter's 0.25", speed(got))
+	}
+}
+```
+
+No sleeps and no flakes, because the harness controls time and knows when
+the graph is quiet:
+
+- **Timers do not tick.** `app.Tick("localizer")` fires that node's timers
+  once. Wall-clock timers are opt-in (`Options{RealTimers: true}`).
+- **`Publish`, `Tick` and `Call` return when the work is done.** They settle
+  the graph first: a barrier through every node's mailbox, repeated while
+  callbacks are still causing more callbacks, so a message that crosses three
+  nodes has arrived before the next line of the test runs.
+- **Everything else is the real thing.** Parameters resolve from
+  `Options{Params: ...}` exactly as from a file, `app.SetParam` behaves like
+  `ros2 param set`, and `app.Transition(node, conductor.TransitionDeactivate)`
+  gates publishers and handlers the way the lifecycle does in production.
+
+| Helper | What it does |
+|---|---|
+| `conductortest.Run(t, nodes...)` | Wire and activate an app; closes on test cleanup |
+| `conductortest.Publish(app, topic, msg)` | Publish as an outside node would |
+| `conductortest.Watch[T](app, topic)` | Record everything published (`Len`, `All`, `Last`, `Await`) |
+| `conductortest.Call[Req,Res](app, svc, req)` | Call a service the app serves |
+| `app.Tick(node)` / `app.TickN(node, n)` | Fire that node's timers |
+| `app.SetParam` / `app.Param` | Change and read parameters |
+| `app.Transition` / `app.State` | Drive and inspect the lifecycle |
+| `app.Probe(name, &struct{...})` | Attach arbitrary endpoints — an action client, say — as a test-owned node |
+
+Action servers are driven through a probe, which is just another node the
+test owns:
+
+```go
+var driver struct {
+	Walk conductor.ActionClient[Goal, Feedback, Result] `action:"walk"`
+}
+app.Probe("driver", &driver)
+h, _ := driver.Walk.SendGoal(Goal{Steps: 3})
+res, status, _ := h.Result()
+```
+
+`conductor test [dir]` validates the graph first and then runs `go test` on
+the app — a wiring mistake reports itself as `CND010: topic "lidar":
+subscribed by monitor but nothing publishes it`, instead of as ten
+behavioural tests failing for no visible reason.
+
+The examples come with tests ([examples/patrol/patrol_test.go](examples/patrol/patrol_test.go));
+`make test` runs them.
+
 ## The turtlesim tutorial, in conductor
 
 [examples/turtlesim](examples/turtlesim/main.go) is the classic ROS 2
@@ -384,7 +453,7 @@ skip that and leave stale entries on the ROS graph.
 
 ## Status
 
-v0.9 — the static toolchain (scan → validate → generate) works; the runtime
+v1.0 — the static toolchain (scan → validate → generate) works; the runtime
 executes nodes over a pluggable transport: in-process bus by default, or
 Zenoh/rmw_zenoh to join a live ROS 2 graph (see above). CDR serialization is
 pure Go, byte-verified against rclpy; `.msg`/`.srv`/`.action` codegen
@@ -392,7 +461,8 @@ computes RIHS01 hashes locally (validated 692/692 against a full distro).
 Topics, services, and actions all work in both directions on both
 transports; every node is a managed node with graph-derived bringup order;
 parameters load from environment-overlaid files and update live through the
-ROS parameter services; and tracing and metrics are built in.
+ROS parameter services; tracing and metrics are built in; and a whole
+application runs inside `go test` with deterministic timers and no sleeps.
 `.tools/interop.sh` checks every leg against real ROS 2 — 22 of them,
 including the whole turtlesim tutorial. Not yet done:
 transient-local latching, per-environment *externals*, multi-instance node
@@ -409,6 +479,7 @@ namespacing, and `conductor deploy`. See [DESIGN.md](DESIGN.md).
 - [transport/rmwzenoh](transport/rmwzenoh/rmwzenoh.go) — rmw_zenoh wire conventions (pure Go, golden-tested against live traffic)
 - [transport/zenoh](transport/zenoh/zenoh.go) — the cgo Zenoh transport (`-tags zenoh`)
 - [msgs](msgs/msgs.go) — hand-written common ROS message types + registered type hashes
-- [examples/patrol](examples/patrol/nodes.go) — example application
+- [conductortest](conductortest/conductortest.go) — run an application inside `go test`
+- [examples/patrol](examples/patrol/nodes.go) — example application (with [tests](examples/patrol/patrol_test.go))
 - [examples/chatter](examples/chatter/main.go) — minimal ROS-interop example
 - [examples/turtlesim](examples/turtlesim/main.go) — the ROS 2 turtlesim tutorial, in conductor

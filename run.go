@@ -201,16 +201,30 @@ func resolveParamFiles(explicit []string, env string) ([]string, error) {
 	return append(files, envFile), nil
 }
 
+// appOptions is everything Run's flags (or a test harness) can vary about
+// how an application is wired.
+type appOptions struct {
+	transport    string
+	topts        TransportOptions
+	only         string                       // run only this node
+	params       map[string]map[string]string // node -> parameter -> raw value
+	manualTimers bool                         // do not start tickers; fire timers explicitly
+}
+
 func newApp(transportName string, topts TransportOptions, only string, nodeStructs ...any) (*app, error) {
-	return newAppWithParams(transportName, topts, only, nil, nodeStructs...)
+	return newAppOpts(appOptions{transport: transportName, topts: topts, only: only}, nodeStructs...)
 }
 
 func newAppWithParams(transportName string, topts TransportOptions, only string, values map[string]map[string]string, nodeStructs ...any) (*app, error) {
-	tr, err := newTransport(transportName, topts)
+	return newAppOpts(appOptions{transport: transportName, topts: topts, only: only, params: values}, nodeStructs...)
+}
+
+func newAppOpts(o appOptions, nodeStructs ...any) (*app, error) {
+	tr, err := newTransport(o.transport, o.topts)
 	if err != nil {
 		return nil, err
 	}
-	rt := &runtimeState{transport: tr, paramValues: values}
+	rt := &runtimeState{transport: tr, paramValues: o.params}
 	for _, ns := range nodeStructs {
 		ptr := reflect.ValueOf(ns)
 		if ptr.Kind() != reflect.Pointer || ptr.Elem().Kind() != reflect.Struct {
@@ -219,7 +233,7 @@ func newAppWithParams(transportName string, topts TransportOptions, only string,
 		v := ptr.Elem()
 		t := v.Type()
 		name := snakeCase(t.Name())
-		if only != "" && name != only {
+		if o.only != "" && name != o.only {
 			continue
 		}
 		if err := tr.DeclareNode(name); err != nil {
@@ -232,18 +246,8 @@ func newAppWithParams(transportName string, topts TransportOptions, only string,
 		}
 		nr.lifecycle = newLifecycle(nr, hooks)
 		rt.depsFor(name) // ensure every node appears in the dependency graph
-		for i := 0; i < t.NumField(); i++ {
-			f := t.Field(i)
-			if !f.IsExported() {
-				continue
-			}
-			b, ok := v.Field(i).Addr().Interface().(binder)
-			if !ok {
-				continue
-			}
-			if err := b.bind(rt, nr, f, ptr); err != nil {
-				return nil, fmt.Errorf("%s.%s: %w", t.Name(), f.Name, err)
-			}
+		if err := bindFields(rt, nr, ptr); err != nil {
+			return nil, fmt.Errorf("%s: %w", t.Name(), err)
 		}
 		if err := bindLifecycle(rt, nr); err != nil {
 			return nil, fmt.Errorf("%s lifecycle: %w", t.Name(), err)
@@ -254,7 +258,7 @@ func newAppWithParams(transportName string, topts TransportOptions, only string,
 		rt.nodes = append(rt.nodes, nr)
 	}
 	if len(rt.nodes) == 0 {
-		return nil, fmt.Errorf("no nodes to run (node filter %q matched nothing?)", only)
+		return nil, fmt.Errorf("no nodes to run (node filter %q matched nothing?)", o.only)
 	}
 	if err := tr.Start(); err != nil {
 		return nil, err
@@ -263,10 +267,34 @@ func newAppWithParams(transportName string, topts TransportOptions, only string,
 	for _, nr := range rt.nodes {
 		go nr.run()
 	}
-	for _, th := range rt.timers {
-		th.start()
+	if !o.manualTimers {
+		for _, th := range rt.timers {
+			th.start()
+		}
 	}
 	return &app{rt: rt}, nil
+}
+
+// bindFields wires every exported field of ptr that declares a conductor
+// endpoint (Sub, Pub, Param, Timer, Svc, Client, Action, ActionClient) onto
+// the given node.
+func bindFields(rt *runtimeState, nr *nodeRuntime, ptr reflect.Value) error {
+	v := ptr.Elem()
+	t := v.Type()
+	for i := 0; i < t.NumField(); i++ {
+		f := t.Field(i)
+		if !f.IsExported() {
+			continue
+		}
+		b, ok := v.Field(i).Addr().Interface().(binder)
+		if !ok {
+			continue
+		}
+		if err := b.bind(rt, nr, f, ptr); err != nil {
+			return fmt.Errorf("%s: %w", f.Name, err)
+		}
+	}
+	return nil
 }
 
 // bringUp configures and activates every node in dependency order.
@@ -354,6 +382,9 @@ func (a *app) stop() {
 		a.metrics.Shutdown(ctx)
 	}
 	for _, th := range a.rt.timers {
+		if th.stop == nil {
+			continue // never started (manual timers, as in tests)
+		}
 		close(th.stop)
 		<-th.done
 	}

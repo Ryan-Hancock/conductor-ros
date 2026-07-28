@@ -7,6 +7,7 @@
 //	conductor check [dir]   scan and validate the application graph
 //	conductor graph [dir]   print the topic graph as Graphviz dot
 //	conductor build [dir]   check, compile the app, and write gen/ artifacts
+//	conductor test [dir]    check the graph, then run the app's Go tests
 package main
 
 import (
@@ -39,6 +40,8 @@ func main() {
 		err = runGraph(dir)
 	case "build":
 		err = runBuild(dir)
+	case "test":
+		err = runTest(os.Args[2:])
 	case "msggen":
 		err = runMsggen(os.Args[2:])
 	default:
@@ -56,6 +59,9 @@ func usage() {
   conductor check [dir]   scan and validate the application graph
   conductor graph [dir]   print the topic graph as Graphviz dot
   conductor build [dir]   check, compile the app, and write gen/ artifacts
+  conductor test [dir] [go test flags...]
+                          validate the graph, then run the application's Go
+                          tests (see the conductortest package)
   conductor msggen -out <dir> [-pkg <gopkg>] [-ros-pkg <pkg>] <target...>
                           generate Go message types (with computed RIHS01
                           hashes) from .msg definitions; targets are ROS
@@ -219,6 +225,36 @@ func runBuild(dir string) error {
 	fmt.Println("\nwrote:")
 	for _, w := range written {
 		fmt.Println("  " + relPos(app, w))
+	}
+	return nil
+}
+
+// runTest validates the graph before running the tests: a wiring mistake
+// makes every behavioural test fail for the same uninformative reason, so it
+// is worth reporting first, in its own vocabulary.
+func runTest(args []string) error {
+	dir := "."
+	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
+		dir, args = args[0], args[1:]
+	}
+	app, _, err := check(dir, true)
+	if err != nil {
+		return err
+	}
+	rel, err := filepath.Rel(app.ModuleRoot, app.Dir)
+	if err != nil {
+		return err
+	}
+	pattern := "./..."
+	if rel != "." {
+		pattern = "./" + filepath.ToSlash(rel) + "/..."
+	}
+	fmt.Println()
+	cmd := exec.Command("go", append(append([]string{"test"}, args...), pattern)...)
+	cmd.Dir = app.ModuleRoot
+	cmd.Stdout, cmd.Stderr = os.Stdout, os.Stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("go test: %w", err)
 	}
 	return nil
 }

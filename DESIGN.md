@@ -1,9 +1,11 @@
 # Conductor — Design
 
-*Status: v0.3 — static toolchain + pluggable-transport runtime, a working
-rmw_zenoh transport verified against live ROS 2 (Lyrical) traffic, and
-`.msg`-to-Go codegen with local REP-2011 hash computation. This document
-records the vision, the architecture, and the decisions still open.*
+*Status: v1.0 — static toolchain + pluggable-transport runtime, an
+rmw_zenoh transport verified against live ROS 2 (Lyrical) traffic,
+`.msg`/`.srv`/`.action`-to-Go codegen with local REP-2011 hash computation,
+lifecycle, parameters, observability, and an in-process test harness. This
+document records the vision, the architecture, and the decisions still
+open.*
 
 ## Thesis
 
@@ -167,11 +169,11 @@ consolidation explicitly, with a comment) are the exact places bugs hide.
 | Actions (server) | boilerplate | `Action[G,F,R]` fields over the 3-service/2-topic convention; goal state machine, per-goal goroutines, context cancellation; `.action` codegen | ✅ v0.5 |
 | Actions (client, e.g. calling Nav2) | boilerplate | `ActionClient[G,F,R]` with goal handles, feedback channels, cancellation | ✅ v0.6 |
 | Observability | `/rosout` + prayer | a span per callback with W3C trace context propagated through messages; Prometheus metrics per node/topic/callback | ✅ v0.8 |
-| Testing | `launch_testing` | mocked-topic unit tests, rosbag-fixture replay, sim-in-CI scenario runs | v0.5 |
-| Deployment | colcon + rosdep + apt | cross-compiled static binary, `conductor deploy` | v0.6 |
+| Testing | `launch_testing` | the whole app inside `go test`: in-process transport, deterministic timers, settle-not-sleep, typed publish/record/call | ✅ v1.0 |
+| Deployment | colcon + rosdep + apt | cross-compiled static binary, `conductor deploy` | v1.1 |
 | Per-env config (sim/dev/robot-N) | copy-pasted YAML | `-params` files plus `-env` overlays (parameters done; per-environment *externals* still open) | ✅ v0.9 (partial) |
-| Task orchestration (state machines/BTs) | XML/hand-rolled | declarative mission layer | v1.0 |
-| TF conventions | boilerplate | declared static transforms, frame checks in graph | v1.0 |
+| Task orchestration (state machines/BTs) | XML/hand-rolled | declarative mission layer | v1.2 |
+| TF conventions | boilerplate | declared static transforms, frame checks in graph | v1.2 |
 
 ## Observability (v0.8, implemented)
 
@@ -201,6 +203,34 @@ exposition format is a few lines to write. Message counts, callback
 latency sums, service outcomes, and lifecycle state per node, all with no
 user code.
 
+## Testing (v1.0, implemented)
+
+The framework owns wiring, the executors, and the clock's effect on the
+application, which is exactly what makes a ROS test flaky when the framework
+does not. So the harness (`conductortest`, over `conductor.TestApp`) takes
+all three back:
+
+- **The in-process transport is the same transport.** Nodes are wired,
+  brought up through their real lifecycle, and talk over the bus that ships
+  in production; only the wire format is absent.
+- **Timers do not tick.** `Tick(node)` fires a node's timers once, so a test
+  says "one control period passed" rather than sleeping and hoping. Wall
+  clock timers remain available for the tests that genuinely want them.
+- **Settle, don't sleep.** `Publish`, `Tick` and `Call` return only once the
+  graph is quiet: a barrier is queued behind every node's mailbox and the
+  round repeats while callbacks are still producing callbacks. A message
+  crossing three nodes has arrived before the next assertion runs, with no
+  timing constants in the test.
+- **Probes.** A test can wire its own endpoints into the running app as an
+  extra node (`app.Probe`), which is how action clients — with goal handles,
+  feedback channels and cancellation — are driven without special-casing
+  actions in the harness.
+
+`conductor test` runs graph validation before the tests, because a wiring
+mistake otherwise surfaces as a pile of behavioural failures with no
+explanation. That ordering is the same instinct as the rest of the design:
+say what is wrong in the vocabulary of the mistake.
+
 ## Non-goals
 
 - Hard-realtime control (stays in C++/ros2_control; interop via externals).
@@ -224,7 +254,11 @@ user code.
    (Encore precedent: keep the app model in code, environments in config —
    which argues for a separate environments file over conductor.json
    sections.)
-5. Services/actions API shape: `Svc[Req,Res]` with `OnField(Req) (Res,
+5. Sim-in-CI: the harness covers logic; scenario tests against Gazebo (or a
+   rosbag fixture replayed through the zenoh transport) are the missing
+   layer, and they need a story for time — likely `/clock` and a simulated
+   time source behind the same Tick abstraction.
+6. Services/actions API shape: `Svc[Req,Res]` with `OnField(Req) (Res,
    error)` is the obvious mirror; actions need goal/feedback/result and
    cancellation — design against Nav2's action servers as the reference
    consumer.

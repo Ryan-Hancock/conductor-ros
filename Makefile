@@ -36,8 +36,12 @@ build: ## compile everything with the default in-process transport
 	go build ./...
 
 .PHONY: test
-test: ## unit tests (CDR, scanner, graph, runtime, RIHS01 corpus)
+test: ## unit tests (runtime, harness, examples, CDR, graph, RIHS01 corpus)
 	go test ./...
+
+.PHONY: test-race
+test-race: ## unit tests under the race detector
+	go test -race ./...
 
 .PHONY: fmt
 fmt: ## gofmt the tree
@@ -57,7 +61,7 @@ check: ## validate every example's graph (conductor check)
 	done
 
 .PHONY: verify
-verify: fmt vet test check ## everything that runs without a live ROS graph
+verify: fmt vet test-race check ## everything that runs without a live ROS graph
 
 .PHONY: gen
 gen: ## regenerate launch XML, params.yaml and graph.dot for examples/patrol

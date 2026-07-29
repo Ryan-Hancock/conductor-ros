@@ -292,3 +292,98 @@ func TestFleetStateHasNoNullLists(t *testing.T) {
 		}
 	}
 }
+
+// Two robots run the same application on two ROS graphs. Their topics share
+// names and nothing else, so merging them into one would draw edges between
+// machines that cannot talk.
+func TestFleetKeepsRobotsApart(t *testing.T) {
+	peer := func(node, robot string, topics []TopicView) Peer {
+		s := process(node, topics)
+		return Peer{Name: node, Host: robot, Robot: robot, URL: fakePeer(t, s).URL}
+	}
+	pose := "geometry_msgs/msg/PoseStamped"
+	s := fleetOf(t, FleetOptions{},
+		peer("localizer", "patrol-1", []TopicView{pub("amcl_pose", pose, "reliable", "localizer", 10)}),
+		peer("navigator", "patrol-1", []TopicView{sub("amcl_pose", pose, "reliable", "navigator", 9)}),
+		peer("localizer", "patrol-2", []TopicView{pub("amcl_pose", pose, "reliable", "localizer", 20)}),
+		peer("navigator", "patrol-2", []TopicView{sub("amcl_pose", pose, "reliable", "navigator", 19)}))
+
+	if len(s.Topics) != 2 {
+		t.Fatalf("%d topics, want amcl_pose once per robot: %+v", len(s.Topics), s.Topics)
+	}
+	for _, topic := range s.Topics {
+		if topic.Name != "amcl_pose" {
+			t.Fatalf("unexpected topic %+v", topic)
+		}
+		if len(topic.Pubs) != 1 || len(topic.Subs) != 1 {
+			t.Fatalf("%s on %s has %d pubs and %d subs, want one of each",
+				topic.Name, topic.Robot, len(topic.Pubs), len(topic.Subs))
+		}
+		if topic.Pubs[0].Process != topic.Robot+"/localizer" {
+			t.Fatalf("publisher %q is not on %s", topic.Pubs[0].Process, topic.Robot)
+		}
+	}
+	if s.Topics[0].Sent == s.Topics[1].Sent {
+		t.Fatal("the two robots' counters were merged")
+	}
+
+	// Bringup order is per robot, and the fleet summary carries both.
+	if len(s.Robots) != 2 {
+		t.Fatalf("robots = %+v", s.Robots)
+	}
+	for _, r := range s.Robots {
+		if got := strings.Join(r.Order, " -> "); got != r.Name+"/localizer -> "+r.Name+"/navigator" {
+			t.Errorf("%s order = %s", r.Name, got)
+		}
+		if r.Processes != 2 || r.Reachable != 2 {
+			t.Errorf("%s = %d/%d processes", r.Name, r.Reachable, r.Processes)
+		}
+	}
+}
+
+// A missing publisher is reported against the robot it is missing on.
+func TestFleetFindingsNameTheRobot(t *testing.T) {
+	orphan := process("navigator", []TopicView{
+		sub("amcl_pose", "geometry_msgs/msg/PoseStamped", "reliable", "navigator", 1),
+	})
+	s := fleetOf(t, FleetOptions{},
+		Peer{Name: "navigator", Host: "patrol-2", Robot: "patrol-2", URL: fakePeer(t, orphan).URL})
+
+	got := findings(s, "FLEET04")
+	if len(got) != 1 || !strings.Contains(got[0].Msg, "on patrol-2") {
+		t.Fatalf("FLEET04 = %v, want the robot named", got)
+	}
+}
+
+// Robots may legitimately be calibrated differently — that is what a robot's
+// own frames file is for — so trees are compared within a robot, not across.
+func TestFleetComparesTransformTreesWithinARobot(t *testing.T) {
+	tree := func(x float64) []FrameView {
+		return []FrameView{{Parent: "base_link", Child: "laser", XYZ: [3]float64{x, 0, 0.19}}}
+	}
+	withFrames := func(node string, frames []FrameView) DashboardState {
+		s := process(node, nil)
+		s.Frames = frames
+		return s
+	}
+	peer := func(node, robot string, frames []FrameView) Peer {
+		return Peer{Name: node, Host: robot, Robot: robot, URL: fakePeer(t, withFrames(node, frames)).URL}
+	}
+
+	// Different robots, different calibration: expected, not a finding.
+	across := fleetOf(t, FleetOptions{},
+		peer("localizer", "patrol-1", tree(0.12)),
+		peer("localizer", "patrol-2", tree(0.118)))
+	if got := findings(across, "FLEET06"); len(got) != 0 {
+		t.Fatalf("two robots with their own calibration reported %v", got)
+	}
+
+	// Two processes of one robot disagreeing means one is running an older
+	// release, which is a finding.
+	within := fleetOf(t, FleetOptions{},
+		peer("localizer", "patrol-1", tree(0.12)),
+		peer("navigator", "patrol-1", tree(0.118)))
+	if got := findings(within, "FLEET06"); len(got) != 1 {
+		t.Fatalf("FLEET06 = %v, want one process of patrol-1 reported", got)
+	}
+}

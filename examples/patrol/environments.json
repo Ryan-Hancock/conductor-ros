@@ -44,7 +44,24 @@
         }
       },
       "frames": "frames.robot.json",
-      "dashboard_addr": ":4000"
+      "dashboard_addr": ":4000",
+      "robots": [
+        {
+          "name": "patrol-1",
+          "host": "pi@patrol-1",
+          "frames": "frames.robot.json"
+        },
+        {
+          "name": "patrol-2",
+          "host": "pi@patrol-2",
+          "params": [
+            "params.patrol-2.yaml"
+          ],
+          "dashboard_addr": ":4100",
+          "metrics_addr": ":9190",
+          "endpoint": "tcp/127.0.0.1:7448"
+        }
+      ]
     }
   }
 }

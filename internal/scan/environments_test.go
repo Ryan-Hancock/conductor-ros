@@ -225,3 +225,118 @@ func TestResolveFramesPerEnvironment(t *testing.T) {
 		t.Fatalf("Resolve(spare) = %v, want it to refuse the missing frames file", err)
 	}
 }
+
+const fleetConfig = `{
+  "environments": {
+    "robot": {
+      "transport": "zenoh",
+      "endpoint": "tcp/127.0.0.1:7447",
+      "params": ["params.robot.yaml"],
+      "dashboard_addr": ":4000",
+      "deploy": {"host": "pi@spare", "goarch": "arm64", "prefix": "/opt/conductor"},
+      "robots": [
+        {"name": "patrol-1", "host": "pi@patrol-1", "frames": "frames.patrol-1.json"},
+        {"name": "patrol-2", "host": "pi@patrol-2", "params": ["params.patrol-2.yaml"],
+         "dashboard_addr": ":4100", "endpoint": "tcp/10.0.0.2:7447", "scope": "user", "prefix": "/srv/conductor"}
+      ]
+    }
+  }
+}`
+
+func fleetApp(t *testing.T) *App {
+	t.Helper()
+	dir := writeApp(t, map[string]string{
+		"conductor.json":       baseConfig,
+		"environments.json":    fleetConfig,
+		"frames.json":          `{"static":[{"parent":"base_link","child":"laser","xyz":[0.1,0,0.2]}]}`,
+		"frames.patrol-1.json": `{"static":[{"parent":"base_link","child":"laser","xyz":[0.118,0,0.191]}]}`,
+		"params.robot.yaml":    "navigator:\n  ros__parameters:\n    max_speed: 1.5\n",
+		"params.patrol-2.yaml": "navigator:\n  ros__parameters:\n    max_speed: 0.9\n",
+	})
+	app, err := ScanApp(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return app
+}
+
+// A robot is its environment with that machine's overrides applied — and
+// resolving one must leave the environment alone for the next.
+func TestResolveRobotOverrides(t *testing.T) {
+	app := fleetApp(t)
+
+	one, err := app.ResolveRobot("robot", "patrol-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if one.Robot == nil || one.Robot.Name != "patrol-1" {
+		t.Fatalf("robot = %+v", one.Robot)
+	}
+	if one.Env.Deploy.Host != "pi@patrol-1" {
+		t.Errorf("host = %q, want the robot's", one.Env.Deploy.Host)
+	}
+	if one.Env.Deploy.GOARCH != "arm64" {
+		t.Errorf("goarch = %q, want the environment's", one.Env.Deploy.GOARCH)
+	}
+	if one.FramesFile != "frames.patrol-1.json" || one.Frames.Transforms[0].XYZ[0] != 0.118 {
+		t.Errorf("frames = %s %+v, want the robot's calibration", one.FramesFile, one.Frames.Transforms[0].XYZ)
+	}
+
+	two, err := app.ResolveRobot("robot", "patrol-2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Parameters append: a robot tunes what the environment set.
+	if got := strings.Join(two.Env.Params, ","); got != "params.robot.yaml,params.patrol-2.yaml" {
+		t.Errorf("params = %s, want the environment's then the robot's", got)
+	}
+	for _, c := range [][3]string{
+		{"endpoint", two.Env.Endpoint, "tcp/10.0.0.2:7447"},
+		{"dashboard", two.Env.Dashboard, ":4100"},
+		{"scope", two.Env.Deploy.Scope, "user"},
+		{"prefix", two.Env.Deploy.Prefix, "/srv/conductor"},
+	} {
+		if c[1] != c[2] {
+			t.Errorf("%s = %q, want %q", c[0], c[1], c[2])
+		}
+	}
+	// patrol-2 declares no frames of its own, so it keeps the environment's.
+	if two.FramesFile != "frames.json" {
+		t.Errorf("frames = %s, want the environment's", two.FramesFile)
+	}
+
+	// Resolving robots must not have disturbed each other or the environment.
+	if one.Env.Endpoint != "tcp/127.0.0.1:7447" || one.Env.Dashboard != ":4000" {
+		t.Errorf("patrol-1 picked up patrol-2's overrides: %+v", one.Env)
+	}
+	if env := app.Environments["robot"]; env.Deploy.Host != "pi@spare" || len(env.Params) != 1 {
+		t.Errorf("the environment was mutated: %+v", env)
+	}
+}
+
+func TestResolveRobotErrors(t *testing.T) {
+	app := fleetApp(t)
+	if _, err := app.ResolveRobot("robot", "patrol-9"); err == nil ||
+		!strings.Contains(err.Error(), "patrol-1, patrol-2") {
+		t.Fatalf("error = %v, want the declared robots listed", err)
+	}
+	plain := scanApp(t) // an environment with no robots
+	if _, err := plain.ResolveRobot("sim", "patrol-1"); err == nil ||
+		!strings.Contains(err.Error(), "declares no robots") {
+		t.Fatalf("error = %v, want it to say the environment has no fleet", err)
+	}
+}
+
+// A fleet whose robots cannot be told apart is refused when it is read, not
+// halfway through a rollout.
+func TestRobotsNeedDistinctNames(t *testing.T) {
+	for _, bad := range []string{
+		`{"environments": {"robot": {"robots": [{"name": "a"}, {"name": "a"}]}}}`,
+		`{"environments": {"robot": {"robots": [{"host": "pi@x"}]}}}`,
+	} {
+		dir := writeApp(t, map[string]string{"conductor.json": baseConfig, "environments.json": bad})
+		if _, err := ScanApp(dir); err == nil {
+			t.Errorf("accepted %s", bad)
+		}
+	}
+}

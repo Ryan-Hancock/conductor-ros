@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	"conductor.dev/conductor/internal/deploy"
 	"conductor.dev/conductor/internal/graph"
@@ -19,6 +20,9 @@ func runDeploy(args []string) error {
 	dir, args := splitDir(args)
 	fs := flag.NewFlagSet("deploy", flag.ExitOnError)
 	env := fs.String("env", "", "environment to deploy (see environments.json)")
+	robot := fs.String("robot", "", "deploy to one robot of the environment's fleet (default: all of them, in order)")
+	noGate := fs.Bool("no-gate", false, "do not wait for each robot's graph to come up before the next")
+	gateTimeout := fs.Duration("gate-timeout", 90*time.Second, "how long one robot has to come up before the rollout stops")
 	host := fs.String("host", "", `target host (user@host), or "local" for this machine; overrides the environment`)
 	goarch := fs.String("goarch", "", "target architecture (default: the environment's, else this machine's)")
 	goos := fs.String("goos", "", "target OS (default linux)")
@@ -47,10 +51,15 @@ func runDeploy(args []string) error {
 		g   *graph.Graph
 		err error
 	)
+	// A fleet is checked and reported per robot inside the rollout, since
+	// each robot resolves its own parameters and calibration.
+	fleet := false
 	if *rollback {
-		app, err = resolve(dir, *env)
-	} else {
-		app, g, err = check(dir, *env, true)
+		app, err = resolveRobot(dir, *env, *robot)
+	} else if app, err = resolve(dir, *env); err == nil && len(app.Robots()) > 0 {
+		fleet = true
+	} else if err == nil {
+		app, g, err = checkRobot(dir, *env, *robot, true)
 	}
 	if err != nil {
 		return err
@@ -79,6 +88,14 @@ func runDeploy(args []string) error {
 	}
 	if *tags != "" {
 		o.Tags = strings.Split(*tags, ",")
+	}
+	if fleet {
+		return deploy.RunFleet(app, o, deploy.FleetRollout{
+			Robot:       *robot,
+			NoGate:      *noGate,
+			GateTimeout: *gateTimeout,
+			Out:         os.Stdout,
+		})
 	}
 	return deploy.Run(app, g, o)
 }

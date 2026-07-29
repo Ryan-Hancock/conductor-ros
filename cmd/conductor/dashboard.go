@@ -27,6 +27,7 @@ func runDashboard(args []string) error {
 	dir, args := splitDir(args)
 	fs := flag.NewFlagSet("dashboard", flag.ExitOnError)
 	env := fs.String("env", "", "environment whose processes to aggregate (see environments.json)")
+	robot := fs.String("robot", "", "aggregate one robot of the environment's fleet (default: all of them)")
 	addr := fs.String("addr", ":5000", "serve the fleet view on this address")
 	var peerList stringList
 	fs.Var(&peerList, "peers", "peer dashboard to aggregate as [name=]url (repeatable, or comma-separated)")
@@ -38,7 +39,7 @@ func runDashboard(args []string) error {
 		return err
 	}
 
-	peers, opts, err := resolvePeers(dir, *env, peerList)
+	peers, opts, err := resolvePeers(dir, *env, *robot, peerList)
 	if err != nil {
 		return err
 	}
@@ -85,9 +86,9 @@ func runDashboard(args []string) error {
 // it from the environment. Either way it also collects what the application
 // declares statically about topics that come from outside it, which the
 // running processes cannot know.
-func resolvePeers(dir, env string, explicit []string) ([]conductor.Peer, conductor.FleetOptions, error) {
+func resolvePeers(dir, env, robot string, explicit []string) ([]conductor.Peer, conductor.FleetOptions, error) {
 	var opts conductor.FleetOptions
-	app, err := resolve(dir, env)
+	app, err := resolveRobot(dir, env, robot)
 	if err != nil && len(explicit) == 0 {
 		return nil, opts, err
 	}
@@ -109,7 +110,13 @@ func resolvePeers(dir, env string, explicit []string) ([]conductor.Peer, conduct
 			app.Name, app.Env.Name())
 	}
 	order, _ := g.BringupOrder()
-	return deploy.Peers(app, order), opts, nil
+	// One robot resolves to one machine; a fleet resolves to all of them,
+	// which is the same call over every robot.
+	if robot != "" || len(app.Robots()) == 0 {
+		return deploy.Peers(app, order), opts, nil
+	}
+	peers, err := deploy.FleetPeers(app, order)
+	return peers, opts, err
 }
 
 // externalTopics is the set of topics an environment expects someone else to

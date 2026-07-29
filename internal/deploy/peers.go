@@ -16,6 +16,25 @@ import (
 // fleet view can resolve the same addresses from the same declarations rather
 // than being handed a list that drifts.
 
+// FleetPeers returns the dashboard endpoints of every process of every robot
+// an environment runs on, robot by robot. An environment with no robots
+// declared is one machine, which is the same loop with one iteration.
+func FleetPeers(app *scan.App, order []string) ([]conductor.Peer, error) {
+	robots := app.Robots()
+	if len(robots) == 0 {
+		return Peers(app, order), nil
+	}
+	var out []conductor.Peer
+	for _, r := range robots {
+		on, err := app.ForRobot(r)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, Peers(on, order)...)
+	}
+	return out, nil
+}
+
 // Peers returns the dashboard endpoints of an environment's processes, in
 // bringup order. It is empty when the environment declares no dashboard
 // address, because then there is nothing serving one.
@@ -29,22 +48,30 @@ func Peers(app *scan.App, order []string) []conductor.Peer {
 		SingleProcess: singleProcess(app),
 	}
 	host := peerHost(app)
+	// A robot is one ROS graph, and its name is what the fleet view labels
+	// its nodes with; without a fleet the machine's own name does that job.
+	robot, label := "", host
+	if app.Robot != nil {
+		robot, label = app.Robot.Name, app.Robot.Name
+	}
 
 	if dep.SingleProcess {
 		// One unit runs every node, so there is one dashboard: the whole
 		// application, on the base port.
 		return []conductor.Peer{{
-			Name: app.Name,
-			Host: host,
-			URL:  peerURL(host, dep.DashboardAddr(0)),
+			Name:  app.Name,
+			Host:  label,
+			Robot: robot,
+			URL:   peerURL(host, dep.DashboardAddr(0)),
 		}}
 	}
 	peers := make([]conductor.Peer, 0, len(order))
 	for i, node := range order {
 		peers = append(peers, conductor.Peer{
-			Name: node,
-			Host: host,
-			URL:  peerURL(host, dep.DashboardAddr(i)),
+			Name:  node,
+			Host:  label,
+			Robot: robot,
+			URL:   peerURL(host, dep.DashboardAddr(i)),
 		})
 	}
 	return peers

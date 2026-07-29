@@ -5,6 +5,8 @@ import (
 	"strings"
 	"testing"
 
+	"conductor.dev/conductor"
+
 	"conductor.dev/conductor/internal/gen"
 	"conductor.dev/conductor/internal/scan"
 )
@@ -91,6 +93,78 @@ func TestPeerHostDropsTheSSHUser(t *testing.T) {
 		app := envApp(&scan.Environment{Deploy: &scan.DeployConfig{Host: c[0]}})
 		if got := peerHost(app); got != c[1] {
 			t.Errorf("peerHost(%q) = %q, want %q", c[0], got, c[1])
+		}
+	}
+}
+
+// A fleet's peers are every process of every robot, labelled by the machine
+// they run on and reached at whatever address that machine declares.
+func TestFleetPeers(t *testing.T) {
+	app := &scan.App{Name: "patrol"}
+	app.Env = &scan.Environment{
+		Transport: "zenoh",
+		Dashboard: ":4000",
+		Deploy:    &scan.DeployConfig{Host: "pi@spare"},
+		Robots: []*scan.Robot{
+			{Name: "patrol-1", Host: "pi@patrol-1"},
+			{Name: "patrol-2", Host: "pi@patrol-2", Dashboard: ":4100"},
+		},
+	}
+
+	peers, err := FleetPeers(app, []string{"localizer", "navigator"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []conductor.Peer{
+		{Name: "localizer", Host: "patrol-1", Robot: "patrol-1", URL: "http://patrol-1:4000"},
+		{Name: "navigator", Host: "patrol-1", Robot: "patrol-1", URL: "http://patrol-1:4001"},
+		{Name: "localizer", Host: "patrol-2", Robot: "patrol-2", URL: "http://patrol-2:4100"},
+		{Name: "navigator", Host: "patrol-2", Robot: "patrol-2", URL: "http://patrol-2:4101"},
+	}
+	if len(peers) != len(want) {
+		t.Fatalf("%d peers, want %d: %+v", len(peers), len(want), peers)
+	}
+	for i := range want {
+		if peers[i] != want[i] {
+			t.Errorf("peer %d = %+v, want %+v", i, peers[i], want[i])
+		}
+	}
+}
+
+// An environment with no robots is one machine, which is the same call with
+// one iteration.
+func TestFleetPeersWithoutAFleet(t *testing.T) {
+	app := envApp(&scan.Environment{Transport: "zenoh", Dashboard: ":4000",
+		Deploy: &scan.DeployConfig{Host: "pi@patrol-1"}})
+	peers, err := FleetPeers(app, []string{"localizer"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(peers) != 1 || peers[0].Robot != "" || peers[0].URL != "http://patrol-1:4000" {
+		t.Fatalf("peers = %+v", peers)
+	}
+}
+
+// The gate's question: everything answering, every node Active.
+func TestHealthProblems(t *testing.T) {
+	healthy := conductor.FleetState{Processes: []conductor.ProcessView{{
+		Label: "patrol-1/navigator", OK: true,
+		Nodes: []conductor.NodeView{{Name: "navigator", State: "active"}},
+	}}}
+	if got := healthProblems(healthy); len(got) != 0 {
+		t.Fatalf("healthy robot reported %v", got)
+	}
+
+	sick := conductor.FleetState{Processes: []conductor.ProcessView{
+		{Label: "patrol-1/localizer", OK: false, Err: "connection refused"},
+		{Label: "patrol-1/navigator", OK: true,
+			Nodes: []conductor.NodeView{{Name: "navigator", State: "inactive"}}},
+		{Label: "patrol-1/patroller", OK: true},
+	}}
+	got := strings.Join(healthProblems(sick), "; ")
+	for _, want := range []string{"localizer is not answering", "navigator is inactive", "patroller reports no nodes"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("problems %q missing %q", got, want)
 		}
 	}
 }

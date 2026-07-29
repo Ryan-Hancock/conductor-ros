@@ -1,0 +1,7 @@
+# patrol-2 is the older chassis: it patrols the same route more slowly.
+navigator:
+  ros__parameters:
+    max_speed: 0.9
+patroller:
+  ros__parameters:
+    dwell: "5s"

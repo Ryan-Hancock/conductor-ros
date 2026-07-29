@@ -50,6 +50,9 @@ type App struct {
 	EnvNames     []string
 	DefaultEnv   string
 	Env          *Environment
+	// Robot is the machine this App has been resolved for, when the
+	// environment declares a fleet; nil otherwise.
+	Robot *Robot
 }
 
 type Node struct {

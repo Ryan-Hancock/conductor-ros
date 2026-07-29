@@ -44,6 +44,11 @@ type Peer struct {
 	Name string `json:"name"` // label, usually the node it runs
 	Host string `json:"host"` // machine label, for a fleet of robots
 	URL  string `json:"url"`  // base URL of that process's dashboard
+
+	// Robot scopes the merge. Two robots are two ROS graphs: their topics
+	// share names without sharing anything else, so they are merged apart.
+	// Empty means one graph, which is the single-machine case.
+	Robot string `json:"robot,omitempty"`
 }
 
 // FleetState is the merged view of every peer.
@@ -54,13 +59,24 @@ type FleetState struct {
 	Topics    []FleetTopic  `json:"topics"`
 	Missions  []MissionView `json:"missions"`
 	Frames    []FrameView   `json:"frames"`
+	Robots    []FleetRobot  `json:"robots"`
 	Findings  []Finding     `json:"findings"`
 	Reachable int           `json:"reachable"`
 	Tracing   bool          `json:"tracing"` // the fleet collector is running
 
-	// framesFrom is the peer whose transform tree the merged one came from,
-	// so a disagreement can name both sides.
-	framesFrom string
+	// frames and framesFrom track the tree reported per robot, so a
+	// disagreement inside one robot can name both sides.
+	frames     map[string][]FrameView
+	framesFrom map[string]string
+}
+
+// FleetRobot groups a fleet's processes by the machine — and the ROS graph —
+// they belong to.
+type FleetRobot struct {
+	Name      string   `json:"name"`
+	Order     []string `json:"bringup_order"`
+	Processes int      `json:"processes"`
+	Reachable int      `json:"reachable"`
 }
 
 // ProcessView is one peer's answer, or the reason there wasn't one.
@@ -85,6 +101,7 @@ type ProcessView struct {
 // rather than as "(ROS graph)" at both ends.
 type FleetTopic struct {
 	Name     string          `json:"name"`
+	Robot    string          `json:"robot,omitempty"`
 	Type     string          `json:"type"`
 	QoS      string          `json:"qos"`
 	Pubs     []FleetEndpoint `json:"pubs"`
@@ -218,18 +235,41 @@ func mergeFleet(views []ProcessView, opts FleetOptions) FleetState {
 		Findings:  []Finding{},
 	}
 	topics := map[string]*FleetTopic{}
-	var order []string
+	// Nodes, edges and topics are grouped per robot: two robots run the same
+	// application on two ROS graphs, so their topics share names and nothing
+	// else. Joining them would draw edges across machines that cannot talk.
+	order := map[string][]string{}
 	deps := map[string]*nodeDeps{}
 	seenNode := map[string]bool{}
+	var robots []string
 
-	add := func(name string) *FleetTopic {
-		t, ok := topics[name]
+	robotOf := func(v *ProcessView) string { return v.Robot }
+	seeRobot := func(name string) {
+		for _, r := range robots {
+			if r == name {
+				return
+			}
+		}
+		robots = append(robots, name)
+	}
+	addNode := func(robot, key string) {
+		if seenNode[key] {
+			return
+		}
+		seenNode[key] = true
+		order[robot] = append(order[robot], key)
+		deps[key] = newNodeDeps()
+	}
+
+	add := func(robot, name string) *FleetTopic {
+		key := robot + "\x00" + name
+		t, ok := topics[key]
 		if !ok {
 			t = &FleetTopic{
-				Name: name, External: opts.External[name],
+				Name: name, Robot: robot, External: opts.External[name],
 				Pubs: []FleetEndpoint{}, Subs: []FleetEndpoint{},
 			}
-			topics[name] = t
+			topics[key] = t
 		}
 		return t
 	}
@@ -237,27 +277,21 @@ func mergeFleet(views []ProcessView, opts FleetOptions) FleetState {
 	for i := range views {
 		v := &views[i]
 		v.Label = v.label()
+		robot := robotOf(v)
+		seeRobot(robot)
 		if !v.OK {
 			out.Findings = append(out.Findings, Finding{"error", "FLEET01",
 				fmt.Sprintf("%s is not answering on %s: %s", v.label(), v.URL, v.Err)})
 			// A process that is not answering still belongs in the graph:
 			// the point of the view is to show the hole, not to close it.
-			if !seenNode[v.label()] {
-				seenNode[v.label()] = true
-				order = append(order, v.label())
-				deps[v.label()] = newNodeDeps()
-			}
+			addNode(robot, v.label())
 			continue
 		}
 		out.Reachable++
 
 		for _, n := range v.Nodes {
 			key := nodeKey(v.label(), n.Name)
-			if !seenNode[key] {
-				seenNode[key] = true
-				order = append(order, key)
-				deps[key] = newNodeDeps()
-			}
+			addNode(robot, key)
 			if n.State != "active" {
 				out.Findings = append(out.Findings, Finding{"warning", "FLEET02",
 					fmt.Sprintf("%s is %s, not active", key, n.State)})
@@ -269,7 +303,7 @@ func mergeFleet(views []ProcessView, opts FleetOptions) FleetState {
 		}
 
 		for _, t := range v.topics {
-			ft := add(t.Name)
+			ft := add(robot, t.Name)
 			mergeTopicFacts(&out, v, ft, t)
 			for _, node := range t.Pubs {
 				ft.Pubs = append(ft.Pubs, FleetEndpoint{
@@ -289,28 +323,58 @@ func mergeFleet(views []ProcessView, opts FleetOptions) FleetState {
 			m.Node = nodeKey(v.label(), m.Node)
 			out.Missions = append(out.Missions, m)
 		}
-		mergeFrames(&out, v)
+		mergeFrames(&out, v, robot)
 	}
 
 	for _, t := range topics {
 		sort.Slice(t.Pubs, func(i, j int) bool { return t.Pubs[i].Node < t.Pubs[j].Node })
 		sort.Slice(t.Subs, func(i, j int) bool { return t.Subs[i].Node < t.Subs[j].Node })
 		if len(t.Pubs) == 0 && len(t.Subs) > 0 && !t.External {
-			// Nothing in the fleet publishes it and the application does not
+			// Nothing on this robot publishes it and the application does not
 			// declare it as coming from outside — so either a process is
 			// down, or the graph is wrong.
 			out.Findings = append(out.Findings, Finding{"error", "FLEET04",
-				fmt.Sprintf("topic %q: %d subscriber(s) in this deployment and no publisher answering",
-					t.Name, len(t.Subs))})
+				fmt.Sprintf("topic %q%s: %d subscriber(s) in this deployment and no publisher answering",
+					t.Name, onRobot(t.Robot), len(t.Subs))})
 		}
 		out.Topics = append(out.Topics, *t)
 	}
-	sort.Slice(out.Topics, func(i, j int) bool { return out.Topics[i].Name < out.Topics[j].Name })
+	sort.Slice(out.Topics, func(i, j int) bool {
+		if out.Topics[i].Robot != out.Topics[j].Robot {
+			return out.Topics[i].Robot < out.Topics[j].Robot
+		}
+		return out.Topics[i].Name < out.Topics[j].Name
+	})
 	sort.Slice(out.Missions, func(i, j int) bool { return out.Missions[i].Node < out.Missions[j].Node })
 
-	out.Order, _ = BringupOrder(order, deps)
+	// Bringup order is a property of one graph, so it is derived per robot
+	// and the fleet's order is those in declaration order.
+	sort.Strings(robots)
+	for _, r := range robots {
+		ordered, _ := BringupOrder(order[r], deps)
+		summary := FleetRobot{Name: r, Order: ordered}
+		for i := range views {
+			if robotOf(&views[i]) != r {
+				continue
+			}
+			summary.Processes++
+			if views[i].OK {
+				summary.Reachable++
+			}
+		}
+		out.Robots = append(out.Robots, summary)
+		out.Order = append(out.Order, ordered...)
+	}
 	sortFindings(out.Findings)
 	return out
+}
+
+// onRobot names the machine in a message, when there is more than one.
+func onRobot(robot string) string {
+	if robot == "" {
+		return ""
+	}
+	return " on " + robot
 }
 
 // mergeTopicFacts records a topic's type and QoS, and reports peers that
@@ -335,28 +399,37 @@ func mergeTopicFacts(out *FleetState, v *ProcessView, ft *FleetTopic, t TopicVie
 		}
 		if *f.seen != f.got {
 			out.Findings = append(out.Findings, Finding{"error", "FLEET05",
-				fmt.Sprintf("topic %q: processes disagree on %s (%s vs %s from %s) — a partial deploy?",
-					ft.Name, f.kind, *f.seen, f.got, v.label())})
+				fmt.Sprintf("topic %q%s: processes disagree on %s (%s vs %s from %s) — a partial deploy?",
+					ft.Name, onRobot(ft.Robot), f.kind, *f.seen, f.got, v.label())})
 		}
 	}
 }
 
-// mergeFrames keeps one transform tree for the fleet and reports any peer
-// whose tree differs: two robots with different calibration, or one that
-// missed a release.
-func mergeFrames(out *FleetState, v *ProcessView) {
+// mergeFrames keeps a transform tree per robot and reports processes of one
+// robot whose trees differ — one of them is running an older release. Two
+// *robots* may legitimately differ: per-robot calibration is what a robot's
+// own frames file is for, so that comparison is not made.
+func mergeFrames(out *FleetState, v *ProcessView, robot string) {
 	if len(v.Frames) == 0 {
 		return
 	}
-	if len(out.Frames) == 0 {
-		out.Frames = v.Frames
-		out.framesFrom = v.label()
+	if out.frames == nil {
+		out.frames = map[string][]FrameView{}
+		out.framesFrom = map[string]string{}
+	}
+	seen, ok := out.frames[robot]
+	if !ok {
+		out.frames[robot] = v.Frames
+		out.framesFrom[robot] = v.label()
+		if len(out.Frames) == 0 {
+			out.Frames = v.Frames // the page shows one tree; the first will do
+		}
 		return
 	}
-	if !sameFrames(out.Frames, v.Frames) {
+	if !sameFrames(seen, v.Frames) {
 		out.Findings = append(out.Findings, Finding{"error", "FLEET06",
-			fmt.Sprintf("%s reports a different transform tree from %s: one of them is running an older release",
-				v.label(), out.framesFrom)})
+			fmt.Sprintf("%s reports a different transform tree from %s%s: one of them is running an older release",
+				v.label(), out.framesFrom[robot], onRobot(robot))})
 	}
 }
 

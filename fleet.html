@@ -90,6 +90,12 @@ svg { display: block; width: 100%; height: auto; }
 .nodebox.down { stroke: var(--bad); }
 .nodelabel { font: 600 12px -apple-system, sans-serif; fill: var(--ink); }
 .proclabel { font: 10px var(--mono); fill: var(--dim); }
+.robotlabel { font: 600 11px -apple-system, sans-serif; fill: var(--dim); letter-spacing: 0.04em; }
+.robotband { fill: none; stroke: var(--line); stroke-dasharray: 3 3; }
+.robotgroup { margin-top: 14px; }
+.robotgroup:first-child { margin-top: 0; }
+.robotgroup > h3 { margin: 0 0 8px; font-size: 12px; font-weight: 600; color: var(--dim);
+  display: flex; align-items: baseline; gap: 8px; }
 .topiclabel { font: 11px var(--mono); fill: var(--dim); }
 .mission { border-top: 1px solid var(--line); padding: 10px 0; }
 .mission:first-child { border-top: 0; padding-top: 0; }
@@ -168,7 +174,8 @@ svg { display: block; width: 100%; height: auto; }
     <h2>topics</h2>
     <div class="body">
       <table>
-        <thead><tr><th>topic</th><th>type</th><th>qos</th><th>publishers</th><th>subscribers</th>
+        <thead><tr><th id="topicrobot" hidden>robot</th><th>topic</th><th>type</th><th>qos</th>
+          <th>publishers</th><th>subscribers</th>
           <th class="num">sent</th><th class="num">received</th><th class="num">msg/s</th></tr></thead>
         <tbody id="topics"></tbody>
       </table>
@@ -208,7 +215,9 @@ const node = (key) => key.slice(key.lastIndexOf("/") + 1);
 
 function renderHeader(s) {
   const errs = s.findings.filter((f) => f.severity === "error").length;
+  const fleet = s.robots.filter((r) => r.name).length;
   $("meta").innerHTML = [
+    ...(fleet > 1 ? [["robots", fleet]] : []),
     ["processes", `${s.reachable}/${s.processes.length}`],
     ["nodes", s.bringup_order.length],
     ["topics", s.topics.length],
@@ -233,45 +242,57 @@ function renderFindings(s) {
 // each process alone can only report as "(ROS graph)".
 function renderGraph(s, flows) {
   const svg = $("graph");
-  const order = s.bringup_order;
-  const col = new Map(order.map((n, i) => [n, i]));
   const down = s.processes.filter((p) => !p.ok).map((p) => p.label);
   const isDown = (key) => down.some((l) => key === l || key.startsWith(l + "/"));
-  const W = 168, H = 46, GAPX = 92, GAPY = 26, PAD = 8;
-  const rows = new Map();
+  const W = 168, H = 46, GAPX = 92, GAPY = 26, PAD = 8, LANES = 46, BAND = 26;
+
+  // A robot is a ROS graph of its own, so each gets its own band: edges are
+  // drawn within a robot, never between two that cannot talk to each other.
+  const bands = s.robots.length ? s.robots : [{ name: "", bringup_order: s.bringup_order }];
   const pos = new Map();
-  for (const key of order) {
-    const c = col.get(key);
-    const r = rows.get(c) || 0;
-    rows.set(c, r + 1);
-    pos.set(key, { x: PAD + c * (W + GAPX), y: PAD + r * (H + GAPY), key });
+  const col = new Map();
+  let y = PAD, width = 0, out = "";
+
+  for (const band of bands) {
+    const order = band.bringup_order || [];
+    if (!order.length) continue;
+    const top = y + (band.name ? BAND : 0);
+    order.forEach((key, i) => {
+      col.set(key, i);
+      pos.set(key, { x: PAD + i * (W + GAPX), y: top, key, band });
+    });
+    width = Math.max(width, PAD * 2 + order.length * W + (order.length - 1) * GAPX);
+    band.top = top;
+    band.bottom = top + H;
+    y = top + H + LANES;
   }
-  const cols = Math.max(1, order.length);
-  const maxRow = Math.max(1, ...rows.values());
-  const width = PAD * 2 + cols * W + (cols - 1) * GAPX;
-  const height = PAD * 2 + maxRow * H + (maxRow - 1) * GAPY + 60;
+  const height = y;
+
+  for (const band of bands) {
+    if (!band.name || band.top === undefined) continue;
+    out += `<text class="robotlabel" x="${PAD}" y="${band.top - 10}">${esc(band.name)}</text>`;
+  }
 
   const edges = [];
   for (const t of s.topics) {
     for (const p of t.pubs) {
       for (const sub of t.subs) {
         const a = pos.get(p.key), b = pos.get(sub.key);
-        if (!a || !b || a === b) continue;
-        edges.push({ a, b, topic: t.name, cross: p.process !== sub.process });
+        if (!a || !b || a === b || a.band !== b.band) continue;
+        edges.push({ a, b, topic: t.name });
       }
     }
   }
 
-  let out = "";
   let lane = 0;
   for (const e of edges) {
-    const busy = (flows.get(e.topic) || 0) > 0.05 ? " busy" : "";
+    const busy = (flows.get(e.a.band.name + "\x00" + e.topic) ?? flows.get(e.topic) ?? 0) > 0.05 ? " busy" : "";
     const x1 = e.a.x + W, y1 = e.a.y + H / 2, x2 = e.b.x, y2 = e.b.y + H / 2;
     const far = Math.abs(col.get(e.b.key) - col.get(e.a.key)) > 1 || x2 < x1;
     let d, lx, ly;
     if (far) {
       // Route long edges below the row so they do not cross the boxes.
-      const dip = PAD + maxRow * H + (maxRow - 1) * GAPY + 14 + (lane % 3) * 13;
+      const dip = e.a.band.bottom + 14 + (lane % 3) * 12;
       lane++;
       d = `M${x1},${y1} C${x1 + 40},${dip} ${x2 - 40},${dip} ${x2},${y2}`;
       lx = (x1 + x2) / 2; ly = dip + 2;
@@ -283,21 +304,20 @@ function renderGraph(s, flows) {
     out += `<path class="edge${busy}" d="${d}"/>`;
     out += `<text class="topiclabel" x="${lx}" y="${ly}" text-anchor="middle">${esc(e.topic)}</text>`;
   }
-  for (const key of order) {
-    const p = pos.get(key);
+  for (const [key, p] of pos) {
     const proc = key.slice(0, key.lastIndexOf("/"));
     const bad = isDown(key) ? " down" : "";
     out += `<rect class="nodebox${bad}" x="${p.x}" y="${p.y}" width="${W}" height="${H}" rx="7"/>`;
     out += `<text class="nodelabel" x="${p.x + W / 2}" y="${p.y + 20}" text-anchor="middle">${esc(node(key))}</text>`;
     out += `<text class="proclabel" x="${p.x + W / 2}" y="${p.y + 35}" text-anchor="middle">${esc(proc)}</text>`;
   }
-  svg.setAttribute("viewBox", `0 0 ${width} ${height}`);
+  svg.setAttribute("viewBox", `0 0 ${Math.max(width, 100)} ${Math.max(height, 60)}`);
   svg.innerHTML = out;
 }
 
 function renderProcesses(s, dt) {
   $("prochint").textContent = `${s.reachable} of ${s.processes.length} answering`;
-  $("procs").innerHTML = s.processes.map((p) => {
+  const card = (p) => {
     const title = esc(p.label || p.name || p.url);
     if (!p.ok) {
       return `<div class="proc down"><h3>${title} <span class="state down">down</span></h3>
@@ -314,10 +334,28 @@ function renderProcesses(s, dt) {
     return `<div class="proc"><h3>${title} <span class="chip">${esc(p.app.transport)}</span></h3>
       <div class="sub">${esc(p.app.host)} · pid ${p.app.pid} · up ${uptime} · ${p.latency_ms.toFixed(1)}ms</div>
       <div class="nodes">${nodes}</div></div>`;
+  };
+
+  const fleet = s.robots.filter((r) => r.name).length > 1;
+  if (!fleet) {
+    $("procs").innerHTML = s.processes.map(card).join("");
+    return;
+  }
+  // With a fleet, the cards are grouped by machine: "which robot is unwell"
+  // is the question being asked.
+  $("procs").innerHTML = "";
+  $("procs").style.display = "block";
+  $("procs").innerHTML = s.robots.map((r) => {
+    const mine = s.processes.filter((p) => p.robot === r.name);
+    return `<div class="robotgroup"><h3>${esc(r.name)}
+      <span class="chip">${r.reachable}/${r.processes} answering</span></h3>
+      <div class="procs" style="padding:0">${mine.map(card).join("")}</div></div>`;
   }).join("");
 }
 
 function renderTopics(s, dt, flows) {
+  const fleet = s.robots.filter((r) => r.name).length > 1;
+  $("topicrobot").hidden = !fleet;
   $("topics").innerHTML = s.topics.map((t) => {
     // An empty end is only "the ROS graph" if the application says the topic
     // comes from outside it; otherwise it is a hole, and saying so is the
@@ -326,12 +364,12 @@ function renderTopics(s, dt, flows) {
       ? list.map((e) => `${esc(e.node)} <span class="chip">${esc(e.process)}</span>`).join(" ")
       : (t.external ? '<span class="chip">ROS graph</span>'
                     : '<span style="color:var(--bad)">nobody</span>');
-    return `<tr><td class="mono">${esc(t.name)}</td><td class="mono">${esc(t.type || "")}</td>
+    return `<tr>${fleet ? `<td class="mono">${esc(t.robot || "")}</td>` : ""}<td class="mono">${esc(t.name)}</td><td class="mono">${esc(t.type || "")}</td>
       <td><span class="chip">${esc(t.qos || "")}</span></td>
       <td>${ends(t.pubs)}</td><td>${ends(t.subs)}</td>
       <td class="num">${t.sent}</td><td class="num">${t.received}</td>
-      <td class="num">${fmtRate(flows.get(t.name) ?? null)}</td></tr>`;
-  }).join("") || `<tr><td colspan="8" class="empty">no topics</td></tr>`;
+      <td class="num">${fmtRate(flows.get((t.robot || "") + "\x00" + t.name) ?? null)}</td></tr>`;
+  }).join("") || `<tr><td colspan="9" class="empty">no topics</td></tr>`;
 }
 
 function renderMissions(s) {
@@ -439,7 +477,8 @@ async function tick() {
   // A topic's rate is what its publishers send; counting deliveries as well
   // would double a topic that has one subscriber.
   const flows = new Map(s.topics.map((t) =>
-    [t.name, rate("topic:" + t.name, t.pubs.length ? t.sent : t.received, dt)]));
+    [(t.robot || "") + "\x00" + t.name,
+     rate("topic:" + (t.robot || "") + ":" + t.name, t.pubs.length ? t.sent : t.received, dt)]));
   renderHeader(s);
   renderFindings(s);
   renderGraph(s, flows);

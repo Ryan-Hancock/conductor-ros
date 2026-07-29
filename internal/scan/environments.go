@@ -61,7 +61,45 @@ type Environment struct {
 
 	Deploy *DeployConfig `json:"deploy"`
 
+	// Robots are the machines this environment runs on. One robot (or none
+	// at all, which means the deploy host) is the ordinary case; several
+	// make the environment a fleet, rolled out one robot at a time.
+	Robots []*Robot `json:"robots"`
+
 	name string
+}
+
+// Robot is one machine an environment runs on. It inherits everything from
+// its environment and overrides only what is genuinely per-machine: where it
+// is, how it is calibrated, and what it is tuned to.
+//
+//	"robot": {
+//	  "transport": "zenoh",
+//	  "deploy": {"goarch": "arm64", "tags": ["zenoh"], "cgo": true},
+//	  "robots": [
+//	    {"name": "patrol-1", "host": "pi@patrol-1", "frames": "frames.patrol-1.json"},
+//	    {"name": "patrol-2", "host": "pi@patrol-2", "params": ["params.patrol-2.yaml"]}
+//	  ]
+//	}
+//
+// Modelling a robot as an environment's instance rather than as a separate
+// kind of thing is what keeps one code path: resolving an environment for a
+// robot produces an ordinary resolved application, and every command that
+// takes -env takes -robot the same way.
+type Robot struct {
+	Name string `json:"name"`
+	Host string `json:"host"` // user@host for ssh; empty deploys to this machine
+
+	// Per-machine overrides. Params are appended after the environment's, so
+	// a robot tunes rather than replaces; the rest replace when set.
+	Params    []string `json:"params"`
+	Frames    string   `json:"frames"`
+	Domain    *int     `json:"domain"`
+	Endpoint  string   `json:"endpoint"`
+	Metrics   string   `json:"metrics_addr"`
+	Dashboard string   `json:"dashboard_addr"`
+	Prefix    string   `json:"prefix"`
+	Scope     string   `json:"scope"`
 }
 
 // DeployConfig is where an environment's binary goes and how it is built.
@@ -112,7 +150,56 @@ func loadEnvironments(dir string, app *App) error {
 	if app.DefaultEnv != "" && app.Environments[app.DefaultEnv] == nil {
 		return fmt.Errorf("environments.json: default environment %q is not declared", app.DefaultEnv)
 	}
+	for _, name := range app.EnvNames {
+		if err := checkRobots(app.Environments[name]); err != nil {
+			return fmt.Errorf("environments.json: %w", err)
+		}
+	}
 	return nil
+}
+
+// checkRobots refuses a fleet that cannot be addressed: a rollout names
+// robots one at a time, in logs and on the command line, so they need names,
+// and two machines answering to one name is a mistake worth catching here
+// rather than halfway through a rollout.
+func checkRobots(env *Environment) error {
+	seen := map[string]bool{}
+	for i, r := range env.Robots {
+		if r == nil {
+			return fmt.Errorf("environment %q: robot %d is empty", env.name, i)
+		}
+		if r.Name == "" {
+			return fmt.Errorf("environment %q: robot %d has no name", env.name, i)
+		}
+		if seen[r.Name] {
+			return fmt.Errorf("environment %q: two robots are named %q", env.name, r.Name)
+		}
+		seen[r.Name] = true
+	}
+	return nil
+}
+
+// RobotNames lists the environment's robots in rollout order.
+func (e *Environment) RobotNames() []string {
+	out := make([]string, 0, len(e.Robots))
+	for _, r := range e.Robots {
+		out = append(out, r.Name)
+	}
+	return out
+}
+
+// RobotByName finds a declared robot.
+func (e *Environment) RobotByName(name string) (*Robot, error) {
+	for _, r := range e.Robots {
+		if r.Name == name {
+			return r, nil
+		}
+	}
+	if len(e.Robots) == 0 {
+		return nil, fmt.Errorf("environment %q declares no robots (add a robots list to environments.json)", e.name)
+	}
+	return nil, fmt.Errorf("unknown robot %q in environment %q (declared: %s)",
+		name, e.name, strings.Join(e.RobotNames(), ", "))
 }
 
 // Resolve returns a copy of the app as it looks in the named environment:
@@ -141,6 +228,91 @@ func (a *App) Resolve(name string) (*App, error) {
 		return nil, err
 	}
 	return &out, nil
+}
+
+// ResolveRobot resolves an environment as it looks on one of its robots: the
+// environment's configuration with that machine's overrides applied. The
+// result is an ordinary resolved application — Env carries the merged
+// settings — so deploy, check and the dashboard need no notion of a robot
+// beyond choosing which one.
+func (a *App) ResolveRobot(envName, robotName string) (*App, error) {
+	resolved, err := a.Resolve(envName)
+	if err != nil {
+		return nil, err
+	}
+	if robotName == "" {
+		return resolved, nil
+	}
+	if resolved.Env == nil {
+		return nil, fmt.Errorf("robot %q selected but no environment is declared", robotName)
+	}
+	robot, err := resolved.Env.RobotByName(robotName)
+	if err != nil {
+		return nil, err
+	}
+	return resolved.ForRobot(robot)
+}
+
+// ForRobot applies one robot's overrides to an already-resolved app. Callers
+// holding a resolved environment use this directly; ResolveRobot is the same
+// thing from names.
+func (a *App) ForRobot(robot *Robot) (*App, error) {
+	env := *a.Env // a copy: resolving one robot must not disturb the next
+	env.Robots = nil
+	if robot.Domain != nil {
+		env.Domain = robot.Domain
+	}
+	for _, field := range []struct {
+		dst *string
+		val string
+	}{
+		{&env.Endpoint, robot.Endpoint},
+		{&env.Metrics, robot.Metrics},
+		{&env.Dashboard, robot.Dashboard},
+	} {
+		if field.val != "" {
+			*field.dst = field.val
+		}
+	}
+	// Parameters append: a robot tunes what the environment set rather than
+	// starting again, and the later file wins.
+	if len(robot.Params) > 0 {
+		env.Params = append(append([]string{}, env.Params...), robot.Params...)
+	}
+	deploy := &DeployConfig{}
+	if env.Deploy != nil {
+		copied := *env.Deploy
+		deploy = &copied
+	}
+	if robot.Host != "" {
+		deploy.Host = robot.Host
+	}
+	if robot.Prefix != "" {
+		deploy.Prefix = robot.Prefix
+	}
+	if robot.Scope != "" {
+		deploy.Scope = robot.Scope
+	}
+	env.Deploy = deploy
+
+	out := *a
+	out.Env = &env
+	out.Robot = robot
+	if robot.Frames != "" {
+		if err := resolveFrames(a, &Environment{name: env.name, Frames: robot.Frames}, &out); err != nil {
+			return nil, err
+		}
+	}
+	return &out, nil
+}
+
+// Robots returns the environment's robots, or a single unnamed one standing
+// for "wherever this environment deploys" — so a caller can loop either way.
+func (a *App) Robots() []*Robot {
+	if a.Env == nil || len(a.Env.Robots) == 0 {
+		return nil
+	}
+	return a.Env.Robots
 }
 
 // mergeExternals overlays an environment's externals on the base set. An

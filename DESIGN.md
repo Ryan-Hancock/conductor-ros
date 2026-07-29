@@ -1,13 +1,14 @@
 # Conductor — Design
 
-*Status: v1.2 — static toolchain + pluggable-transport runtime, an
+*Status: v1.3 — static toolchain + pluggable-transport runtime, an
 rmw_zenoh transport verified against live ROS 2 (Lyrical) traffic,
 `.msg`/`.srv`/`.action`-to-Go codegen with local REP-2011 hash computation,
 lifecycle, parameters, observability with a built-in dashboard, an in-process
 test harness, declared environments, single-binary deployment with
-graph-derived systemd units, declarative missions, and a declared transform
-tree. This document records the vision, the architecture, and the decisions
-still open.*
+graph-derived systemd units, declarative missions, a declared transform tree,
+and a fleet view that merges a deployment's processes — across robots — into
+one graph. This document records the vision, the architecture, and the
+decisions still open.*
 
 ## Thesis
 
@@ -184,8 +185,8 @@ consolidation explicitly, with a comment) are the exact places bugs hide.
 | Actions (client, e.g. calling Nav2) | boilerplate | `ActionClient[G,F,R]` with goal handles, feedback channels, cancellation | ✅ v0.6 |
 | Observability | `/rosout` + prayer | a span per callback with W3C trace context propagated through messages; Prometheus metrics per node/topic/callback; a built-in dashboard (graph, live rates, lifecycle, parameters, traces, missions, frames) served by the app itself | ✅ v0.8, dashboard v1.2 |
 | Testing | `launch_testing` | the whole app inside `go test`: in-process transport, deterministic timers, settle-not-sleep, typed publish/record/call | ✅ v1.0 |
-| Deployment | colcon + rosdep + apt | `conductor deploy`: cross-compiled binary, release bundle with a manifest, systemd units whose ordering is the graph's bringup order, ssh install, rollback | ✅ v1.1 |
-| Per-env config (sim/dev/robot-N) | copy-pasted YAML | `environments.json`: per-environment externals, transport, parameter overlays and deploy target; `check/graph/build/deploy -env` | ✅ v1.1 |
+| Deployment | colcon + rosdep + apt | `conductor deploy`: cross-compiled binary, release bundle with a manifest, systemd units whose ordering is the graph's bringup order, ssh install, rollback; fleets roll robot by robot, gated on each graph coming up | ✅ v1.1, fleets v1.3 |
+| Per-env config (sim/dev/robot-N) | copy-pasted YAML | `environments.json`: per-environment externals, transport, parameter overlays and deploy target, and the robots an environment runs on, each overriding its own calibration and tuning; `-env` and `-robot` everywhere | ✅ v1.1, robots v1.3 |
 | Task orchestration (state machines/BTs) | XML/hand-rolled | `Mission`/`Step` fields with tagged transitions; targets checked (including literal `Goto`s), unreachable steps warned, machine drawn in mission.dot, current step observable | ✅ v1.2 |
 | TF conventions | `static_transform_publisher` in a launch file | `frames.json` published on tf_static, `TF.Lookup` composition, `frame:` tags that stamp and check headers, tree checked at build time | ✅ v1.2 |
 
@@ -283,9 +284,26 @@ whose parent has not been collected is marked as an orphan rather than
 promoted to a root, because "this is the start of the chain" and "the other
 end is missing" are different statements.
 
-Known gaps: an environment targets one host, so a true multi-robot fleet
-still wants the fleet file open question 6 describes; and there is no
-authentication — the assumption is a robot network, not the internet.
+**Fleets (v1.3, implemented).** A fleet turned out not to need a file of its
+own: it is an environment that runs on more than one machine, so the robots
+are declared in the environment that describes them. Each robot inherits
+everything and overrides only what is per-machine — host, calibration,
+parameter overlays, router endpoint, dashboard port. Resolving a robot
+produces an ordinary resolved application, which is the decision that kept
+one code path: deploy, check and the dashboard gained a `-robot` flag and
+nothing else.
+
+Two consequences worth recording. **The rollout is gated by the runtime's own
+account of itself**: robots are done one at a time, and the next is only
+touched once every process on the last one answers and every node reports
+Active. That is the fleet view used as a gate rather than a person watching a
+dashboard, and it means a bad release reaches one robot instead of ten. **Two
+robots are two ROS graphs**, so the merge keeps them apart; joining them
+would draw edges between machines that cannot talk, and would turn ordinary
+per-robot calibration into a false alarm about diverging transform trees.
+
+Known gap: there is no authentication — the assumption is a robot network,
+not the internet.
 
 ## Missions and frames (v1.2, implemented)
 
@@ -442,15 +460,15 @@ client.
    rosbag fixture replayed through the zenoh transport) are the missing
    layer, and they need a story for time — likely `/clock` and a simulated
    time source behind the same Tick abstraction.
-6. Fleet deployment: `conductor deploy` targets one host. Rolling a release
-   across N robots wants a fleet file, per-robot parameter overlays (which
-   the environment mechanism already supports, one environment per robot at
-   the cost of repetition), and a health gate between robots — roll on if
-   the graph came up, stop if it did not. The runtime already knows whether
-   every node reached Active, so the gate has something real to read — and
-   the fleet view now reads exactly that, so the gate and the view want the
-   same fleet file. The merge already labels nodes by host, so the missing
-   half is only peer resolution across robots.
+6. ~~Fleet deployment~~ (RESOLVED in v1.3): robots are declared inside the
+   environment they belong to rather than in a fleet file of their own,
+   because a fleet is an environment that runs on several machines and a
+   robot is that environment's instance on one. The rollout is sequential
+   and gated on each robot's graph reaching Active. What remains open is
+   rollout policy beyond "one at a time, stop on failure": canarying is
+   expressible today as an environment with one robot, but batching,
+   automatic rollback of the robots already done, and a bake time before
+   moving on are not.
 7. Mission composition: a mission is one machine per node, flat. Nested
    missions (a step that runs a sub-machine) and concurrent branches are what
    behaviour trees offer and this does not. Both are expressible today by

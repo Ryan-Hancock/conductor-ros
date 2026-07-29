@@ -619,9 +619,78 @@ parent ran somewhere else.
 - Traces that cross a process boundary sort first: those are the ones no
   single dashboard could have shown.
 
-Still open: more than one robot per environment, which needs the fleet file
-[DESIGN.md](DESIGN.md) open question 6 describes; and authentication, which
-today is "your robots are on your network".
+### A fleet is an environment's robots
+
+A fleet is not a new kind of thing: it is an environment that runs on more
+than one machine. Robots are declared in the environment that describes them,
+and each inherits everything, overriding only what is genuinely per-machine —
+where it is, how it is calibrated, what it is tuned to:
+
+```json
+"robot": {
+  "transport": "zenoh",
+  "params": ["params.robot.yaml"],
+  "dashboard_addr": ":4000",
+  "deploy": {"goarch": "arm64", "tags": ["zenoh"], "cgo": true},
+  "robots": [
+    {"name": "patrol-1", "host": "pi@patrol-1", "frames": "frames.patrol-1.json"},
+    {"name": "patrol-2", "host": "pi@patrol-2", "params": ["params.patrol-2.yaml"],
+     "endpoint": "tcp/10.0.0.2:7447", "dashboard_addr": ":4100"}
+  ]
+}
+```
+
+Parameters append (a robot tunes what the environment set, and the later file
+wins); everything else replaces. Resolving a robot produces an ordinary
+resolved application, which is what keeps one code path: every command that
+takes `-env` takes `-robot` the same way.
+
+```sh
+conductor check examples/patrol -env robot -robot patrol-2   # its calibration, its parameters
+conductor deploy examples/patrol -env robot                  # roll to every robot, in order
+conductor deploy examples/patrol -env robot -robot patrol-2  # or just one
+conductor dashboard examples/patrol -env robot               # one page over the fleet
+```
+
+**The rollout is gated, and the gate is the fleet view.** Robots are done one
+at a time, and the next is only touched once the last one's graph is up —
+where "up" means every process answering and every node Active, asked of the
+robot rather than slept through:
+
+```
+rolling patrol 20260729-104512 to 2 robot(s): patrol-1, patrol-2
+
+[1/2] patrol-1 (pi@patrol-1)
+  installed patrol 20260729-104512 …
+  waiting for patrol-1 to come up
+    patrol-1/navigator is not answering (connection refused)
+  patrol-1 is up
+
+[2/2] patrol-2 (pi@patrol-2)
+  …
+```
+
+A robot that does not come up inside `-gate-timeout` stops the rollout and
+says how far it got — the point being that a bad release reaches one robot,
+not ten. `-no-gate` skips the wait; an environment with no `dashboard_addr`
+has nothing to ask and says so rather than pretending to check.
+
+Every robot gets the same version string, because a fleet whose machines
+carry different versions cannot be reasoned about afterwards.
+
+**Two robots are two ROS graphs**, and the merged view keeps them apart:
+
+![two robots in the fleet view](docs/fleet-robots.png)
+
+Their topics share names and nothing else, so they are merged per robot —
+otherwise `amcl_pose` would appear to have two publishers and the graph would
+draw edges between machines that cannot talk. Findings name the robot they
+are about (`topic "amcl_pose" on patrol-2: …`), and transform trees are
+compared *within* a robot rather than across one: two processes of one robot
+disagreeing means a half-finished deploy, while two robots differing is
+ordinary per-robot calibration.
+
+Still open: authentication, which today is "your robots are on your network".
 
 ## Testing
 
@@ -836,7 +905,7 @@ $ systemctl --user status patrol.service
 
 ## Status
 
-v1.2 — the static toolchain (scan → validate → generate) works; the runtime
+v1.3 — the static toolchain (scan → validate → generate) works; the runtime
 executes nodes over a pluggable transport: in-process bus by default, or
 Zenoh/rmw_zenoh to join a live ROS 2 graph (see above). CDR serialization is
 pure Go, byte-verified against rclpy; `.msg`/`.srv`/`.action` codegen
@@ -855,7 +924,10 @@ and so is the transform tree: `frames.json` is published on `tf_static`,
 composed by `TF.Lookup`, stamped into headers by a `frame:` tag, and
 validated at build time. `.tools/interop.sh` checks every leg against real
 ROS 2 — 27 of them, including tf2 composing our declared transforms and the
-whole turtlesim tutorial. Not yet done:
+whole turtlesim tutorial. A deployment's processes aggregate into one fleet
+view — union graph, findings only the merge can see, and traces stitched
+across processes — and an environment may run on several robots, rolled out
+one at a time behind a health gate. Not yet done:
 transient-local latching (`tf_static` is republished instead), multi-instance
 node namespacing, and sim-in-CI. See [DESIGN.md](DESIGN.md).
 

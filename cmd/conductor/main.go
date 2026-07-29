@@ -59,7 +59,7 @@ func main() {
 
 func usage() {
 	fmt.Fprint(os.Stderr, `usage:
-  conductor check [dir] [-env <name>]
+  conductor check [dir] [-env <name>] [-robot <name>]
                           scan and validate the application graph
   conductor graph [dir] [-env <name>]
                           print the topic graph as Graphviz dot
@@ -72,13 +72,16 @@ func usage() {
                           build a release bundle (binary, parameters, systemd
                           units) and install it on the environment's target
                             -host, -goarch, -tags, -prefix, -scope, -version
+                            -robot <name> one robot of the environment's fleet
                             -bundle      build the bundle, do not ship it
                             -dry-run     print what would run on the target
                             -no-restart  install without restarting the app
                             -rollback    switch the target back one release
   conductor dashboard [dir] -env <name> [-addr :5000]
-                          serve one page over every process of a deployment,
-                          resolving their dashboards from the environment
+                          serve one page over every process of a deployment
+                          (every robot of a fleet), resolving their dashboards
+                          from the environment
+                            -robot <name>          one robot of the fleet
                             -peers [name=]url,...  aggregate an ad-hoc set
                             -traces N              stitch traces across processes
                             -once                  print the merged state as JSON
@@ -95,10 +98,11 @@ func runCheck(args []string) error {
 	dir, args := splitDir(args)
 	fs := flag.NewFlagSet("check", flag.ExitOnError)
 	env := fs.String("env", "", "environment to validate for (see environments.json)")
+	robot := fs.String("robot", "", "validate as one robot of the environment's fleet")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	_, _, err := check(dir, *env, true)
+	_, _, err := checkRobot(dir, *env, *robot, true)
 	return err
 }
 
@@ -112,7 +116,14 @@ func splitDir(args []string) (string, []string) {
 
 // check scans and validates an application, reporting the graph if asked.
 func check(dir, env string, report bool) (*scan.App, *graph.Graph, error) {
-	app, err := resolve(dir, env)
+	return checkRobot(dir, env, "", report)
+}
+
+// checkRobot is check for one machine of a fleet: the environment resolved
+// with that robot's calibration and parameters, which is what its units will
+// actually run with.
+func checkRobot(dir, env, robot string, report bool) (*scan.App, *graph.Graph, error) {
+	app, err := resolveRobot(dir, env, robot)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -128,17 +139,27 @@ func check(dir, env string, report bool) (*scan.App, *graph.Graph, error) {
 
 // resolve scans dir and resolves it for an environment, without validating.
 func resolve(dir, env string) (*scan.App, error) {
+	return resolveRobot(dir, env, "")
+}
+
+// resolveRobot resolves for one robot of an environment's fleet.
+func resolveRobot(dir, env, robot string) (*scan.App, error) {
 	app, err := scan.ScanApp(dir)
 	if err != nil {
 		return nil, err
 	}
-	return app.Resolve(env)
+	return app.ResolveRobot(env, robot)
 }
 
 func printReport(app *scan.App, g *graph.Graph, issues []graph.Issue) {
 	env := ""
 	if app.Env != nil {
 		env = fmt.Sprintf(" [env %s]", app.Env.Name())
+		if app.Robot != nil {
+			env = fmt.Sprintf(" [env %s, robot %s]", app.Env.Name(), app.Robot.Name)
+		} else if names := app.Env.RobotNames(); len(names) > 0 {
+			env = fmt.Sprintf(" [env %s, %d robots: %s]", app.Env.Name(), len(names), strings.Join(names, ", "))
+		}
 	}
 	fmt.Printf("app %s%s — %d node(s), %d topic(s), %d external interface(s)\n\n",
 		app.Name, env, len(app.Nodes), len(g.Topics), len(app.Externals))

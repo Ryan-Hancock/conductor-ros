@@ -9,6 +9,7 @@
 //	conductor build [dir]   check, compile the app, and write gen/ artifacts
 //	conductor test [dir]    check the graph, then run the app's Go tests
 //	conductor deploy [dir]  build a release bundle and install it on a target
+//	conductor dashboard     serve the fleet view over a deployment's processes
 package main
 
 import (
@@ -42,6 +43,8 @@ func main() {
 		err = runTest(os.Args[2:])
 	case "deploy":
 		err = runDeploy(os.Args[2:])
+	case "dashboard":
+		err = runDashboard(os.Args[2:])
 	case "msggen":
 		err = runMsggen(os.Args[2:])
 	default:
@@ -73,6 +76,11 @@ func usage() {
                             -dry-run     print what would run on the target
                             -no-restart  install without restarting the app
                             -rollback    switch the target back one release
+  conductor dashboard [dir] -env <name> [-addr :5000]
+                          serve one page over every process of a deployment,
+                          resolving their dashboards from the environment
+                            -peers [name=]url,...  aggregate an ad-hoc set
+                            -once                  print the merged state as JSON
   conductor msggen -out <dir> [-pkg <gopkg>] [-ros-pkg <pkg>] <target...>
                           generate Go message types (with computed RIHS01
                           hashes) from .msg definitions; targets are ROS

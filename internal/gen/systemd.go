@@ -23,11 +23,12 @@ type Deployment struct {
 	Flags   []string
 	Environ map[string]string
 
-	// Metrics is the environment's metrics address. It is kept apart from
-	// Flags because a per-node deployment is several processes: they cannot
-	// share one port, so each unit gets the base port plus its position in
-	// the bringup order.
-	Metrics string
+	// Metrics and Dashboard are the environment's metrics and dashboard
+	// addresses. They are kept apart from Flags because a per-node
+	// deployment is several processes: they cannot share one port, so each
+	// unit gets the base port plus its position in the bringup order.
+	Metrics   string
+	Dashboard string
 
 	// SingleProcess runs the whole application as one unit instead of one
 	// per node. It is required by the in-process transport, whose bus does
@@ -146,6 +147,9 @@ func (d Deployment) execStart(node string, index int) string {
 	if addr := d.MetricsAddr(index); addr != "" {
 		args = append(args, "-metrics-addr", addr)
 	}
+	if addr := d.DashboardAddr(index); addr != "" {
+		args = append(args, "-dashboard", addr)
+	}
 	return strings.Join(args, " ")
 }
 
@@ -153,17 +157,25 @@ func (d Deployment) execStart(node string, index int) string {
 // the nodes of a per-node deployment do not fight over one port. Scraping
 // still needs one target per node, which is what a multi-process application
 // looks like to Prometheus either way.
-func (d Deployment) MetricsAddr(index int) string {
-	if d.Metrics == "" {
+func (d Deployment) MetricsAddr(index int) string { return offsetPort(d.Metrics, index) }
+
+// DashboardAddr does the same for the per-process dashboard. The ports are
+// assigned by the same rule the fleet view resolves them by, so
+// `conductor dashboard -env robot` finds the processes this deployment
+// created without being told where they are.
+func (d Deployment) DashboardAddr(index int) string { return offsetPort(d.Dashboard, index) }
+
+func offsetPort(addr string, index int) string {
+	if addr == "" {
 		return ""
 	}
-	host, port, err := net.SplitHostPort(d.Metrics)
+	host, port, err := net.SplitHostPort(addr)
 	if err != nil {
-		return d.Metrics
+		return addr
 	}
 	n, err := strconv.Atoi(port)
 	if err != nil {
-		return d.Metrics
+		return addr
 	}
 	return net.JoinHostPort(host, strconv.Itoa(n+index))
 }

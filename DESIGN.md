@@ -245,6 +245,32 @@ Tracing stays opt-in — a span per callback is not free — and the page is one
 embedded self-contained file, because the machine that most needs the view is
 a robot with no route to a CDN.
 
+**The fleet view (in progress).** A zenoh deployment is one process per node,
+so the honest per-process dashboard is also a partial one: everything beyond
+that process is `ROS graph`. `conductor dashboard -env <name>` fans out over
+the deployment's processes and merges their state into one graph.
+
+Two decisions carry it. The peers are *derived*: units are generated with a
+dashboard port per node (base plus bringup position, the rule the metrics
+ports already follow), so the view resolves the same addresses from the same
+declarations instead of being handed a list that drifts. And the merge is a
+plain HTTP client of the API the processes already serve — no new wire
+protocol, no second source of truth, and it runs from a laptop or from the
+robot itself.
+
+What the merge is *for* is the class of failures no single process can see: a
+subscriber whose publisher is not answering, two processes disagreeing about
+a topic's type or QoS (a deploy caught halfway), two robots reporting
+different transform trees (one stale calibration), a unit that is simply
+down. Those are findings on the page rather than something to notice in four
+journals.
+
+Known gaps: traces are not stitched across processes yet, though the trace
+context already crosses the wire, so the data is there; an environment
+targets one host, so a true multi-robot fleet still wants the fleet file open
+question 6 describes; and there is no authentication — the assumption is a
+robot network, not the internet.
+
 ## Missions and frames (v1.2, implemented)
 
 The two remaining lines of the 80% table were the two places where ROS still
@@ -405,7 +431,10 @@ client.
    the environment mechanism already supports, one environment per robot at
    the cost of repetition), and a health gate between robots — roll on if
    the graph came up, stop if it did not. The runtime already knows whether
-   every node reached Active, so the gate has something real to read.
+   every node reached Active, so the gate has something real to read — and
+   the fleet view now reads exactly that, so the gate and the view want the
+   same fleet file. The merge already labels nodes by host, so the missing
+   half is only peer resolution across robots.
 7. Mission composition: a mission is one machine per node, flat. Nested
    missions (a step that runs a sub-machine) and concurrent branches are what
    behaviour trees offer and this does not. Both are expressible today by

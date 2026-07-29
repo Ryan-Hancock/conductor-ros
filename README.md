@@ -538,7 +538,57 @@ to install next to it — which is what makes it usable over ssh to a robot on
 a network with no route to the internet.
 
 Scope is deliberately one process: in a per-node deployment each unit serves
-its own dashboard, showing what that unit really has open.
+its own dashboard, showing what that unit really has open. Merging them is
+the fleet view below.
+
+## The fleet view
+
+A zenoh deployment is one process per node, and each of them tells the truth
+about itself: its own nodes, and everything else marked `ROS graph`. That is
+the picture ROS 2 already gives you, one terminal at a time. `conductor
+dashboard` fans out over those processes and merges what they report:
+
+```sh
+conductor dashboard examples/patrol -env robot        # addresses from the environment
+conductor dashboard -peers a=host:4000,b=host:4001    # or an ad-hoc set
+```
+
+![the fleet view](docs/fleet.png)
+
+**Nobody writes the addresses down.** The units are generated with a dashboard
+port per node — the environment's `dashboard_addr` plus the node's position in
+the bringup order, the same rule the metrics ports follow — so the fleet view
+resolves the same addresses from the same declarations. `-host` re-points them
+at an ip or a tunnel; `-peers` skips derivation entirely.
+
+**The merge is the feature.** The union graph shows cross-process edges as
+edges, and the findings are the things no single process can see:
+
+| | |
+|---|---|
+| `FLEET01` | a process is not answering — and its nodes stay in the graph, greyed, so the hole is visible |
+| `FLEET02/03` | a node is not Active, or its mailbox is overrunning |
+| `FLEET04` | a topic has subscribers in this deployment and no publisher answering (suppressed for topics `conductor.json` declares external — a driver's topic was never ours to publish) |
+| `FLEET05` | two processes disagree about a topic's type or QoS: what a half-finished deploy looks like from outside |
+| `FLEET06` | two processes report different transform trees: one is running an older release, or a different calibration |
+
+The screenshot above is the patrol app running as four zenoh processes with
+the localizer killed: the view reports both the dead process *and* its
+consequence — `amcl_pose` has a subscriber and nobody publishing it. Neither
+is visible from any one process's dashboard, where the missing publisher just
+looks like a quiet `ROS graph` edge.
+
+It is a plain HTTP client of the per-process API (`/api/summary`, the same
+state without the metric table and traces), so it runs anywhere that can
+reach the robots: a laptop, or one of the robot's own processes. Nothing new
+goes on the wire.
+
+Still open, in rough order: aggregating traces across processes (the trace
+context already propagates over zenoh, so a callback chain that crosses four
+units is reconstructible — the fleet view just does not stitch it yet); more
+than one robot per environment, which needs the fleet file
+[DESIGN.md](DESIGN.md) open question 6 describes; and authentication, which
+today is "your robots are on your network".
 
 ## Testing
 

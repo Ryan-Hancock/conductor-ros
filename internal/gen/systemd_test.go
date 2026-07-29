@@ -1,6 +1,7 @@
 package gen
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -170,4 +171,23 @@ func keys(m map[string]string) []string {
 		out = append(out, k)
 	}
 	return out
+}
+
+// A per-node deployment cannot share one dashboard port either, and the
+// ports it assigns are what the fleet view resolves.
+func TestSystemdDashboardPortsDoNotCollide(t *testing.T) {
+	d := testDeployment()
+	d.Metrics, d.Dashboard = ":9090", ":4000"
+	units := SystemdUnits(chainApp(), d)
+	for i, node := range []string{"localizer", "navigator", "driver"} {
+		unit := units[d.UnitName(node)]
+		for _, want := range []string{
+			fmt.Sprintf("-metrics-addr :%d", 9090+i),
+			fmt.Sprintf("-dashboard :%d", 4000+i),
+		} {
+			if !strings.Contains(unit, want) {
+				t.Errorf("%s unit is missing %q:\n%s", node, want, unit)
+			}
+		}
+	}
 }

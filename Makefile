@@ -82,6 +82,22 @@ verify: fmt vet test-race check ## everything that runs without a live ROS graph
 dashboard: ## run examples/patrol with the live dashboard on :4000
 	cd examples/patrol && go run . -dashboard 127.0.0.1:4000 -dashboard-traces 500
 
+.PHONY: fleet
+fleet: ## (ROS) run examples/patrol as four zenoh processes behind the fleet view
+	@$(WITHROS) set -m; \
+	  pkill -9 -x patrol 2>/dev/null; pkill -9 -x rmw_zenohd 2>/dev/null; sleep 1; \
+	  go build -tags zenoh -o bin/patrol ./examples/patrol || exit 1; \
+	  $$CONDUCTOR_OVERLAY/lib/rmw_zenoh_cpp/rmw_zenohd >/dev/null 2>&1 & router=$$!; \
+	  sleep 2; \
+	  i=0; for n in localizer patroller navigator safety_monitor; do \
+	    (cd examples/patrol && ../../bin/patrol -transport zenoh -node $$n \
+	      -dashboard 127.0.0.1:$$((4000+i)) >/dev/null 2>&1 &); \
+	    i=$$((i+1)); \
+	  done; \
+	  sleep 3; \
+	  $(CLI) dashboard examples/patrol -env robot -host 127.0.0.1; \
+	  pkill -9 -x patrol 2>/dev/null; kill -9 $$router 2>/dev/null
+
 .PHONY: gen
 gen: ## regenerate launch XML, params, graph/mission/frames dot for examples/patrol
 	$(CLI) build examples/patrol

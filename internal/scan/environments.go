@@ -52,9 +52,12 @@ type Environment struct {
 	// environment is.
 	Frames string `json:"frames"`
 
-	// Metrics and Trace default the corresponding runtime flags.
-	Metrics string `json:"metrics_addr"`
-	Trace   bool   `json:"trace"`
+	// Metrics, Dashboard and Trace default the corresponding runtime flags.
+	// A dashboard address makes every unit serve its own portal, which is
+	// what `conductor dashboard -env <name>` then aggregates.
+	Metrics   string `json:"metrics_addr"`
+	Dashboard string `json:"dashboard_addr"`
+	Trace     bool   `json:"trace"`
 
 	Deploy *DeployConfig `json:"deploy"`
 

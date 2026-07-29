@@ -100,7 +100,8 @@ func Run(app *scan.App, g *graph.Graph, o Options) error {
 		Scope:         o.Scope,
 		Flags:         runtimeFlags(app, o),
 		Environ:       environ(app),
-		Metrics:       metricsAddr(app),
+		Metrics:       envAddr(app, func(e *scan.Environment) string { return e.Metrics }),
+		Dashboard:     envAddr(app, func(e *scan.Environment) string { return e.Dashboard }),
 		SingleProcess: singleProcess(app),
 	}
 
@@ -138,6 +139,15 @@ func Run(app *scan.App, g *graph.Graph, o Options) error {
 			}
 		}
 		fmt.Fprintf(o.Out, "  metrics     %s\n", strings.Join(addrs, ", "))
+	}
+	if peers := Peers(app, manifest.BringupOrder); len(peers) > 0 {
+		var addrs []string
+		for _, p := range peers {
+			addrs = append(addrs, p.Name+" "+p.URL)
+		}
+		fmt.Fprintf(o.Out, "  dashboards  %s\n", strings.Join(addrs, ", "))
+		fmt.Fprintf(o.Out, "              aggregate them with: conductor dashboard %s -env %s\n",
+			rel(app, app.Dir), envName(app))
 	}
 
 	if o.BundleOnly {
@@ -457,11 +467,11 @@ func singleProcess(app *scan.App) bool {
 	return transportName(app) == "inproc"
 }
 
-func metricsAddr(app *scan.App) string {
+func envAddr(app *scan.App, pick func(*scan.Environment) string) string {
 	if app.Env == nil {
 		return ""
 	}
-	return app.Env.Metrics
+	return pick(app.Env)
 }
 
 func transportName(app *scan.App) string {

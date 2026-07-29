@@ -260,7 +260,15 @@ type dashboard struct {
 }
 
 // state assembles the current view.
-func (d *dashboard) state() DashboardState {
+func (d *dashboard) state() DashboardState { return d.snapshot(true) }
+
+// summary is the same view without the metric table and the trace ring: what
+// the fleet view fans out for, several times a second, across a deployment.
+// Sending the whole thing to every aggregator would make the poll cost of a
+// robot grow with the number of people watching it.
+func (d *dashboard) summary() DashboardState { return d.snapshot(false) }
+
+func (d *dashboard) snapshot(full bool) DashboardState {
 	rt := d.app.rt
 	endpoints := rt.endpointsSnapshot()
 	byNode := map[string][]Endpoint{}
@@ -318,6 +326,10 @@ func (d *dashboard) state() DashboardState {
 	if exe, err := os.Executable(); err == nil {
 		name = filepath.Base(exe)
 	}
+	metrics, traces := []Metric{}, []TraceView{}
+	if full {
+		metrics, traces = MetricsSnapshot(), d.tracesOrNil()
+	}
 	return DashboardState{
 		App: AppView{
 			Name:      name,
@@ -333,8 +345,8 @@ func (d *dashboard) state() DashboardState {
 		Topics:   topicViews(endpoints),
 		Missions: missionViews(rt),
 		Frames:   frameViews(rt.frames),
-		Metrics:  MetricsSnapshot(),
-		Traces:   d.tracesOrNil(),
+		Metrics:  metrics,
+		Traces:   traces,
 		Now:      time.Now(),
 	}
 }
@@ -506,6 +518,11 @@ func serveDashboard(addr string, a *app, transport string, traceDepth int) *http
 	})
 	mux.HandleFunc("/api/state", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, d.state())
+	})
+	// What a fleet aggregator polls: the same view, minus the parts only a
+	// human reading this one process needs.
+	mux.HandleFunc("/api/summary", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, d.summary())
 	})
 	mux.HandleFunc("/api/params", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {

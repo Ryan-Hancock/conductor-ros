@@ -20,7 +20,8 @@
       ],
       "deploy": {
         "scope": "user"
-      }
+      },
+      "dashboard_addr": "127.0.0.1:4000"
     },
     "robot": {
       "transport": "zenoh",
@@ -42,7 +43,8 @@
           "ROS_DOMAIN_ID": "0"
         }
       },
-      "frames": "frames.robot.json"
+      "frames": "frames.robot.json",
+      "dashboard_addr": ":4000"
     }
   }
 }

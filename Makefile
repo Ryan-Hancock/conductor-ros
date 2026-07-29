@@ -13,7 +13,7 @@ SHELL := /bin/bash
 .SHELLFLAGS := -o pipefail -c
 
 ENV      := .tools/env.sh
-EXAMPLES := chatter patrol fibonacci mission turtlesim
+EXAMPLES := chatter patrol fibonacci mission turtlesim nav2 nav2stub
 CLI      := go run ./cmd/conductor
 # ROS setup.bash reads unset variables, so env.sh must not run under `set -u`.
 WITHROS   = source $(ENV) &&
@@ -25,7 +25,7 @@ help: ## show this help
 	@echo "Conductor targets:"
 	@grep -hE '^[a-z][a-zA-Z0-9_-]*:.*?## ' $(MAKEFILE_LIST) \
 	  | awk -F':.*?## ' '{printf "  \033[36m%-16s\033[0m %s\n", $$1, $$2}'
-	@echo "  interop-<group>  (ROS) one group: lifecycle params services actions frames turtlesim"
+	@echo "  interop-<group>  (ROS) one group: lifecycle params services actions frames nav2 turtlesim"
 	@echo
 	@echo "Targets marked (ROS) need $(ENV) — see README."
 
@@ -93,6 +93,14 @@ gen: ## regenerate launch XML, params, graph/mission/frames dot for examples/pat
 .PHONY: mission
 mission: ## (ROS) run the declarative mission example against the Go action server
 	@$(WITHROS) $(CLI) run examples/mission
+
+.PHONY: nav2
+nav2: ## (ROS) run the Nav2 patrol against the stand-in stack (no Nav2 install needed)
+	@$(WITHROS) $(CLI) run examples/nav2
+
+.PHONY: nav2-sim
+nav2-sim: ## (ROS) the same application against a real nav2_bringup in Gazebo
+	@$(WITHROS) $(CLI) run examples/nav2 -env sim
 
 .PHONY: clean
 clean: ## remove build output

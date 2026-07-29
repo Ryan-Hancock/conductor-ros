@@ -928,6 +928,138 @@ Apps like this one finish, rather than running forever: end with
 after the lifecycle hooks and the transport have shut down. `os.Exit` would
 skip that and leave stale entries on the ROS graph.
 
+## Driving Nav2
+
+Turtlesim is a tutorial. [examples/nav2](examples/nav2/commander.go) is the
+claim this project actually makes: the 20% — planning, control, costmaps —
+stays in Nav2, and conductor takes over the part that is otherwise spread
+across a launch file, a `lifecycle_manager`, a behaviour tree XML and a Python
+node.
+
+The whole patrol is a declaration:
+
+```go
+//conductor:node
+type Commander struct {
+	Stack conductor.Client[ManageLifecycleNodesRequest, ManageLifecycleNodesResponse] `service:"lifecycle_manager_navigation/manage_nodes" timeout:"120s"`
+
+	NavTo   conductor.ActionClient[NavigateToPoseGoal, NavigateToPoseFeedback, NavigateToPoseResult] `action:"navigate_to_pose" timeout:"5m"`
+	Reverse conductor.ActionClient[BackUpGoal, BackUpFeedback, BackUpResult]                         `action:"backup" timeout:"30s"`
+	Rotate  conductor.ActionClient[SpinGoal, SpinFeedback, SpinResult]                               `action:"spin" timeout:"30s"`
+
+	Estimate conductor.Pub[PoseWithCovarianceStamped] `topic:"initialpose" qos:"reliable" frame:"map"`
+	Pose     conductor.Sub[PoseWithCovarianceStamped] `topic:"amcl_pose" qos:"transient" frame:"map"`
+	Battery  conductor.Sub[BatteryState]              `topic:"battery_state" qos:"sensor"`
+
+	Patrol    conductor.Mission `start:"bring_up"`
+	BringUp   conductor.Step    `next:"localize" retry:"3" backoff:"2s" fail:"give_up"`
+	Localize  conductor.Step    `next:"drive_to" timeout:"30s" fail:"give_up"`
+	DriveTo   conductor.Step    `next:"following" retry:"2" backoff:"1s" fail:"give_up"`
+	Following conductor.Step    `next:"arrived" fail:"recover"`
+	Arrived   conductor.Step    `next:"drive_to"`
+	Recover   conductor.Step    `next:"drive_to" retry:"1" fail:"give_up"`
+	Docking   conductor.Step    `next:"charging" retry:"3" backoff:"2s" fail:"give_up"`
+	Charging  conductor.Step    `next:"drive_to"`
+	GiveUp    conductor.Step    `next:"failed"`
+}
+```
+
+Read the tags as the sentence they are — and `conductor build` draws them,
+because the declaration *is* the machine:
+
+![the nav2 patrol mission](docs/nav2-mission.png)
+
+Three things there are worth pointing at, because each replaces something ROS
+leaves to convention:
+
+- **`bring_up` is a step, not a `sleep`.** Nav2's servers are managed nodes;
+  `navigate_to_pose` does not answer until its lifecycle manager has driven
+  them to Active. So the mission's first step asks the manager, and
+  `retry:"3" backoff:"2s"` is the whole of the "it might not be discoverable
+  yet" handling. `conductor run examples/nav2 -env sim` launches
+  `nav2_bringup` with `autostart:=False` for exactly this reason.
+- **`fail:"recover"` is Nav2's own recovery, wired in.** An aborted goal
+  routes to a step that runs `backup` then `spin` and returns to the same
+  waypoint, because the route index is only advanced on arrival. The reason
+  reaches the step: `t.Err()` carries `navigation ABORTED: … (nav2 error_code
+  9000)`.
+- **The low-battery diversion is a checked `Goto`.** `OnArrived` calls
+  `t.Goto("docking")`, and `conductor check` resolves that string against the
+  declared steps — a typo is a build error, not a mission that dies at 3am on
+  the fourth waypoint.
+
+Nav2's interfaces came from the upstream `.action` and `.srv` definitions,
+vendored in [examples/nav2/nav2_msgs](examples/nav2/nav2_msgs) so that the
+example builds with no Nav2 installed, and turned into Go by one command:
+
+```sh
+conductor msggen -out examples/nav2 -pkg main -ros-pkg nav2_msgs \
+  examples/nav2/nav2_msgs \
+  geometry_msgs/msg/{PoseWithCovarianceStamped,TwistStamped} \
+  sensor_msgs/msg/BatteryState diagnostic_msgs/msg/DiagnosticArray
+```
+
+Because the definitions are the upstream text, the RIHS01 hashes are Nav2's,
+and a real stack answers. Two details that a hand-written externals list gets
+wrong: `cmd_vel` is `TwistStamped` (Nav2's `enable_stamped_cmd_vel` now
+defaults on) and `amcl_pose` is latched, so it is declared `qos:"transient"`.
+Both are the kind of transcription that
+[generating externals from a live graph](DESIGN.md#what-comes-next-v14-and-beyond)
+is meant to remove.
+
+### Running it without installing Nav2
+
+[examples/nav2stub](examples/nav2stub/main.go) stands in for a bringup: no
+planner, no costmap, but the same action servers, the same lifecycle service,
+`amcl_pose`, `cmd_vel` and a battery, by the same names and type hashes. It
+refuses goals until the lifecycle manager has started it, and aborts every
+`fail_every`'th goal — a stack that never failed would leave the recovery
+branch untested.
+
+```sh
+make nav2       # router + the stand-in + the application, over zenoh
+make nav2-sim   # the same application against a real nav2_bringup in Gazebo
+```
+
+```
+conductor: started router (pid 1065434)
+conductor: started nav2stub (pid 1065439)
+conductor: waiting for nav2stub (listening on 127.0.0.1:4900)
+conductor: running nav2 [env stub]
+INFO bringing the navigation stack up attempt=1
+INFO navigation stack active
+INFO localized x=0 y=0
+INFO navigating to waypoint index=0 x=1.6 y=0.4
+INFO navigating distance_remaining=1.6 eta=3.6s recoveries=0
+INFO arrived waypoint=0
+...
+WARN mission step failed, taking the fail branch step=following fail=recover
+     err="navigation ABORTED: controller could not make progress (nav2 error_code 9000)"
+WARN recovering because="navigation ABORTED: … (nav2 error_code 9000)" attempt=1
+INFO recovered, retrying the waypoint index=3
+INFO arrived waypoint=3
+WARN battery low, heading for the dock charge=0.142 below=0.25
+INFO docking x=0 y=0 attempt=1
+INFO charging until=0.9
+INFO charged, resuming the patrol charge=0.964
+```
+
+The same mission runs in `go test` in three seconds, with no ROS install and
+no simulator, because the stack it drives is a probe the test controls — "what
+does this robot do when `navigate_to_pose` aborts?" is a unit test:
+
+```go
+nav := newFakeNav2(true)
+nav.outcomes <- errors.New("controller could not make progress")
+app, commander := runCommander(t, nav, nil)
+activate(t, app)
+
+first := await(t, nav.goals, "the first goal")
+await(t, nav.recoveries, "the backup recovery")   // "backup", then "spin"
+retried := await(t, nav.goals, "the retried goal")
+// retried is the same waypoint: a failed goal does not advance the route
+```
+
 ## Deployment
 
 Shipping a ROS 2 application usually means shipping a colcon workspace and
@@ -1029,8 +1161,9 @@ transitions, checked by the same toolchain and drawn in `gen/mission.dot` —
 and so is the transform tree: `frames.json` is published on `tf_static`,
 composed by `TF.Lookup`, stamped into headers by a `frame:` tag, and
 validated at build time. `.tools/interop.sh` checks every leg against real
-ROS 2 — 27 of them, including tf2 composing our declared transforms and the
-whole turtlesim tutorial. A deployment's processes aggregate into one fleet
+ROS 2 — 36 of them, including tf2 composing our declared transforms, the
+whole turtlesim tutorial, and Nav2's interfaces being discoverable under
+their own type names from vendored definitions. A deployment's processes aggregate into one fleet
 view — union graph, findings only the merge can see, and traces stitched
 across processes — and an environment may run on several robots, rolled out
 one at a time behind a health gate. `conductor run` brings an environment up
@@ -1040,7 +1173,15 @@ and torn down by process group.
 `conductor run -split` runs the deployment's process-per-node layout locally,
 with the fleet view over it and the dashboard on by default.
 
-Next, in rough order: worked Nav2 and MoveIt examples, with externals
+Nav2 is driven end to end by [examples/nav2](examples/nav2/commander.go): the
+stack's lifecycle startup, a patrol over `navigate_to_pose`, Nav2's own backup
+and spin behaviours on a `fail:` branch, and a checked `Goto` to the dock when
+the battery runs low — against upstream `nav2_msgs` definitions, so the type
+hashes are Nav2's. It runs against a real `nav2_bringup`, against the
+stand-in in [examples/nav2stub](examples/nav2stub/main.go), and inside `go
+test`.
+
+Next, in rough order: the same treatment for MoveIt, with externals
 generated from a live graph instead of hand-listed; `frames.json` derived
 from a URDF; and simulated time behind the same clock abstraction the test
 harness already proves out. Transient-local latching (`tf_static` is
@@ -1066,3 +1207,5 @@ republished instead) and multi-instance node namespacing remain open. See
 - [examples/chatter](examples/chatter/main.go) — minimal ROS-interop example
 - [examples/mission](examples/mission/main.go) — a declared mission driving a ROS 2 action server
 - [examples/turtlesim](examples/turtlesim/main.go) — the ROS 2 turtlesim tutorial, in conductor
+- [examples/nav2](examples/nav2/commander.go) — a Nav2 patrol: lifecycle startup, recovery branches, docking (with [tests](examples/nav2/nav2_test.go))
+- [examples/nav2stub](examples/nav2stub/main.go) — Nav2's interfaces without Nav2, so the above runs anywhere

@@ -8,7 +8,7 @@
 #   ./.tools/interop.sh            run every leg
 #   ./.tools/interop.sh services   one group
 #                                  (services | actions | lifecycle | params |
-#                                   frames | turtlesim)
+#                                   frames | nav2 | turtlesim)
 #
 # Requires a ROS 2 install plus the user-space rmw_zenoh overlay in .tools
 # (see env.sh). Starts and stops its own zenoh router.
@@ -59,6 +59,8 @@ pkill -9 -x mission 2>/dev/null
 pkill -9 -f pyfib_server.py 2>/dev/null
 pkill -9 -x turtlesim 2>/dev/null
 pkill -9 -x turtlesim_node 2>/dev/null
+pkill -9 -x nav2 2>/dev/null
+pkill -9 -x nav2stub 2>/dev/null
 pkill -9 -x rmw_zenohd 2>/dev/null
 sleep 1
 
@@ -67,6 +69,8 @@ go build -tags zenoh -o "$BIN/patrol" ./examples/patrol
 go build -tags zenoh -o "$BIN/fibonacci" ./examples/fibonacci
 go build -tags zenoh -o "$BIN/mission" ./examples/mission
 go build -tags zenoh -o "$BIN/turtlesim" ./examples/turtlesim
+go build -tags zenoh -o "$BIN/nav2" ./examples/nav2
+go build -tags zenoh -o "$BIN/nav2stub" ./examples/nav2stub
 
 echo "starting zenoh router..."
 bg "$WORK/router.log" "$CONDUCTOR_OVERLAY/lib/rmw_zenoh_cpp/rmw_zenohd"
@@ -250,6 +254,59 @@ if [[ "$GROUP" == all || "$GROUP" == actions ]]; then
   sleep 4
   timeout 40 "$BIN/mission" -transport zenoh >"$WORK/act_go_to_py.log" 2>&1
   check "conductor client -> rclpy server" "$WORK/act_go_to_py.log" "status=SUCCEEDED"
+fi
+
+if [[ "$GROUP" == all || "$GROUP" == nav2 ]]; then
+  echo "nav2:"
+  # Nav2's interfaces are vendored .action/.srv text hashed locally, and
+  # nav2_msgs is NOT installed here. So these checks answer the question that
+  # matters: does the rest of ROS see the same interfaces a real Nav2 would
+  # offer? Type names and RIHS01 hashes come from our definitions; ros2 reads
+  # them off the graph.
+  cat >"$WORK/nav2stub.yaml" <<'YAML'
+nav2:
+  ros__parameters:
+    fail_every: 2
+    speed: 1.5
+YAML
+  bg "$WORK/nav2stub.log" "$BIN/nav2stub" -transport zenoh \
+    -frames examples/nav2stub/frames.json -params "$WORK/nav2stub.yaml"
+  stub_pid="$LAST_PID"
+  sleep 4
+
+  ros2run 25 action list -t >"$WORK/nav2_actions.log" 2>&1
+  check "action server advertises nav2_msgs/action/NavigateToPose" \
+    "$WORK/nav2_actions.log" "/navigate_to_pose [nav2_msgs/action/NavigateToPose]"
+  check "the recovery behaviours advertise their nav2 types" \
+    "$WORK/nav2_actions.log" "/spin [nav2_msgs/action/Spin]"
+
+  ros2run 25 service list -t >"$WORK/nav2_services.log" 2>&1
+  check "lifecycle manager advertises nav2_msgs/srv/ManageLifecycleNodes" \
+    "$WORK/nav2_services.log" "manage_nodes [nav2_msgs/srv/ManageLifecycleNodes]"
+
+  # A latched pose is what amcl offers, so it is what the stand-in offers, and
+  # ros2 has to agree about the profile or a real subscriber would not match.
+  ros2run 25 topic info -v /amcl_pose >"$WORK/nav2_qos.log" 2>&1
+  check "amcl_pose is advertised RELIABLE + TRANSIENT_LOCAL" "$WORK/nav2_qos.log" "Durability: TRANSIENT_LOCAL"
+
+  # Nav2 publishes TwistStamped on cmd_vel now (enable_stamped_cmd_vel), in
+  # the costmap's base frame: both are readable by a stock ros2 CLI. The type
+  # is named because earlier groups leave a plain Twist publisher of the same
+  # topic in the graph, and an ambiguous echo refuses to guess.
+  ros2run 25 topic echo --once /cmd_vel geometry_msgs/msg/TwistStamped >"$WORK/nav2_cmd.log" 2>&1
+  check "cmd_vel decodes as TwistStamped in base_link" "$WORK/nav2_cmd.log" "frame_id: base_link"
+
+  # Then the application itself against it: lifecycle startup, a waypoint
+  # reached, and a goal aborted into the recovery branch and retried.
+  timeout 60 "$BIN/nav2" -transport zenoh -frames examples/nav2/frames.json >"$WORK/nav2_app.log" 2>&1
+  check "conductor drives the stack's lifecycle to active" "$WORK/nav2_app.log" "navigation stack active"
+  check "conductor action client reaches a waypoint" "$WORK/nav2_app.log" "arrived waypoint=0"
+  check "an aborted goal takes the recovery branch" "$WORK/nav2_app.log" "recovering because="
+  check "the recovery retries the same waypoint" "$WORK/nav2_app.log" "recovered, retrying the waypoint"
+
+  { kill -9 "$stub_pid"; wait "$stub_pid"; } 2>/dev/null
+  pkill -9 -x nav2stub 2>/dev/null
+  sleep 1
 fi
 
 if [[ "$GROUP" == all || "$GROUP" == turtlesim ]]; then

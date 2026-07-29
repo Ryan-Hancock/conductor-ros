@@ -1,14 +1,15 @@
 # Conductor — Design
 
-*Status: v1.3 — static toolchain + pluggable-transport runtime, an
+*Status: v1.4 — static toolchain + pluggable-transport runtime, an
 rmw_zenoh transport verified against live ROS 2 (Lyrical) traffic,
 `.msg`/`.srv`/`.action`-to-Go codegen with local REP-2011 hash computation,
 lifecycle, parameters, observability with a built-in dashboard, an in-process
 test harness, declared environments, single-binary deployment with
 graph-derived systemd units, declarative missions, a declared transform tree,
-and a fleet view that merges a deployment's processes — across robots — into
-one graph. This document records the vision, the architecture, and the
-decisions still open.*
+a fleet view that merges a deployment's processes — across robots — into
+one graph, and a worked Nav2 example that drives a real navigation stack
+through its lifecycle, its recovery behaviours and its actions. This document
+records the vision, the architecture, and the decisions still open.*
 
 ## Thesis
 
@@ -190,9 +191,11 @@ consolidation explicitly, with a comment) are the exact places bugs hide.
 | Per-env config (sim/dev/robot-N) | copy-pasted YAML | `environments.json`: per-environment externals, transport, parameter overlays and deploy target, and the robots an environment runs on, each overriding its own calibration and tuning; `-env` and `-robot` everywhere | ✅ v1.1, robots v1.3 |
 | Task orchestration (state machines/BTs) | XML/hand-rolled | `Mission`/`Step` fields with tagged transitions; targets checked (including literal `Goto`s), unreachable steps warned, machine drawn in mission.dot, current step observable | ✅ v1.2 |
 | TF conventions | `static_transform_publisher` in a launch file | `frames.json` published on tf_static, `TF.Lookup` composition, `frame:` tags that stamp and check headers, tree checked at build time | ✅ v1.2 |
-| Driving a stack (Nav2, MoveIt) | hand-written action clients, magic goal/frame/group names, `wait_for_service` loops | worked examples; externals generated from a live graph rather than hand-listed; a lifecycle *client* so a conductor app can bring the stack up and wait for Active | v1.4 |
-| Robot description | URDF + xacro, constants duplicated into code and launch files | `frames.json` derived from the URDF's fixed joints, `/robot_description` published, SRDF planning groups declared and checked like frames | v1.4 |
-| Simulation | `use_sim_time` folklore, hand-written spawn scripts | the simulator is a declared `requires`; a clock source behind `Timer` and header stamping so sim time is the same code path as wall time | v1.4 |
+| Driving Nav2 | hand-written action clients, `wait_for_service` loops, a behaviour tree XML for the sequencing, `lifecycle_manager` for the startup | `examples/nav2`: the stack's startup is a mission step, recovery is a `fail:` branch onto Nav2's own behaviours, docking is a checked `Goto`; upstream `nav2_msgs` definitions so the hashes are Nav2's; a stand-in stack so it runs without one | ✅ v1.4 |
+| Driving MoveIt | as above, plus planning-group magic strings | the same treatment; the largest nested messages in common use, so also a CDR/msggen stress test | v1.5 |
+| Externals of someone else's graph | hand-transcribed from source | generated from a live graph and diffed against what is declared; a lifecycle *client* rather than a service call per manager | v1.5 |
+| Robot description | URDF + xacro, constants duplicated into code and launch files | `frames.json` derived from the URDF's fixed joints, `/robot_description` published, SRDF planning groups declared and checked like frames | v1.5 |
+| Simulation | `use_sim_time` folklore, hand-written spawn scripts | the simulator is a declared `requires`; a clock source behind `Timer` and header stamping so sim time is the same code path as wall time | v1.5 |
 
 ## Observability (v0.8, implemented)
 
@@ -474,37 +477,112 @@ a cross toolchain with zenoh-c for the target. This is the deployment-side
 cost of the transport decision above, and the argument for a pure-Go zenoh
 client.
 
-## What comes next (v1.4 and beyond)
+## Driving Nav2 (v1.4, implemented)
+
+The thesis has been asserted since the first line of this document: the 20%
+stays where it is, and Conductor orchestrates it. `examples/nav2` is the first
+place it is tested against something that did not bend to fit — a stack with
+its own lifecycle, its own recovery behaviours, its own opinions about QoS,
+and interfaces nobody here designed.
+
+The application is two nodes. A **commander** whose mission is the patrol —
+bring the stack up, localize, drive to a waypoint, follow it, arrive, recover,
+dock, charge — and a **watchdog** that reports on `/diagnostics` what Nav2 is
+actually doing, because deciding what should happen and watching what does are
+different jobs with different blocking behaviour. Three claims survive the
+exercise, and each replaces a piece of ROS convention:
+
+- **The stack's startup belongs to the mission, not to a launch file.** Nav2's
+  servers are managed nodes; `navigate_to_pose` does not answer until a
+  `lifecycle_manager` has driven them to Active. So `bring_up` is the mission's
+  first step, calling `manage_nodes` with `retry:"3" backoff:"2s"` — and the
+  `sim` environment launches `nav2_bringup` with `autostart:=False`, because
+  the ordering now comes from the graph. This is the third use of the
+  lifecycle machinery (server, rollout gate, and now client-of-a-manager), and
+  it is what makes the *client* case in the roadmap below worth building
+  properly.
+- **A recovery branch is a tag.** `Following` declares `fail:"recover"`, and
+  the recover step runs Nav2's own `backup` then `spin` and returns to the
+  same waypoint, since the route index only advances on arrival. The reason
+  travels with the branch: `t.Err()` reads `navigation ABORTED: … (nav2
+  error_code 9000)`. In a behaviour tree this is a subtree; here it is one
+  tag and a step that says what it did.
+- **The diversion is a checked string.** `t.Goto("docking")` on a low battery
+  is resolved against the declared steps by `conductor check`, so the branch
+  that runs least often is the one the compiler has already looked at.
+
+The interfaces are the upstream `.action` and `.srv` text, vendored into the
+example so it builds with no Nav2 installed and hashed locally — which means
+the RIHS01 hashes are Nav2's and a real stack answers. Alongside it,
+`examples/nav2stub` serves those same interfaces with no navigation behind
+them, so the example runs, and fails, anywhere: it refuses goals until
+started, and aborts every `fail_every`'th goal, because a stand-in that always
+succeeds would leave the recovery branch untested. The pattern generalizes —
+the stand-in is the cheapest way to make an interop example runnable by
+someone who has not installed the other side.
+
+Four things this found, which is the point of building it:
+
+- **An aborted goal must carry its result.** The action server reported
+  ABORTED and dropped the handler's result value, keeping it only for
+  cancellation. That is wrong for every interface in common use, because the
+  reason for failure lives in the result: `NavigateToPose` puts it in
+  `error_code` and `error_msg`. Fixed, with a test — a client that learns only
+  "aborted" has been told that something went wrong and not what.
+- **Traces do not cross a mission step's publish.** A message published from
+  inside a callback carries that callback's trace context, because the
+  executor stores it for the duration. A mission step runs off the executor by
+  design, so its publishes carry nothing, and the fleet view shows the
+  watchdog's handling of a waypoint as a separate root rather than as the
+  continuation it is. Two candidate fixes: thread a context explicitly at the
+  publish site (an API addition), or have a step publish the trace it is
+  already carrying as a fallback the executor's context overrides. The second
+  is smaller and mis-attributes an action handler's publishes in a node that
+  also runs a mission, which is why this is recorded rather than guessed at.
+- **The frames model's axis is ownership, not motion.** Nav2's tree is
+  entirely someone else's: `robot_state_publisher` publishes the fixed joints,
+  amcl and the odometry publish the moving ones. Conductor's `dynamic` means
+  "not ours", so the example declares the whole tree that way and gets the
+  frame checks (CND050–057) with no publishing — correct, but it means
+  `TF.Lookup` cannot resolve a chain that is fixed in the URDF and merely
+  published by someone else. Deriving the tree from the robot description is
+  the fix for both halves at once.
+- **The externals list is exactly the transcription this project exists to
+  remove.** Two entries in `conductor.json` were only right after reading
+  Nav2's source: `cmd_vel` is `TwistStamped` now, and `amcl_pose` is a latched
+  publisher. Getting either wrong produces silence, which is the failure mode
+  the checker is supposed to prevent — and it cannot, because it is checking a
+  hand-written claim about someone else's graph. Hence the first item below.
+
+## What comes next (v1.5 and beyond)
 
 The pattern so far is that each milestone took something ROS leaves as
 folklore and made it a declaration the toolchain can read. What follows is
 the same exercise applied to the places a conductor application still meets
 the ecosystem by hand.
 
-### Driving the big stacks: Nav2 and MoveIt
+### Generating externals, and driving lifecycles directly
 
-Conductor's thesis is that the 20% — planning, perception, control — stays
-where it is and conductor orchestrates it. Two worked examples would test
-that claim where it is hardest, and both are already half-built: the action
-client was designed against Nav2's servers, and the mission layer is the
-right shape for the sequencing both stacks need.
+The Nav2 example above turned two of these from ideas into needs.
 
-A **Nav2 example** is a patrol mission driving `navigate_to_pose`, with a
-`fail:` branch for a recovery behaviour and a `Goto` for the low-battery
-case. What it will expose is the tedium of the externals list: Nav2 publishes
-and serves dozens of interfaces, and hand-writing them into conductor.json is
-the kind of transcription this project exists to remove. The answer is to
-**generate externals from a live graph** — introspect a running system and
-emit the block — which is also how someone adopts conductor into an existing
-stack rather than starting clean. That, in turn, wants a **lifecycle client**:
-Nav2's nodes are managed nodes driven by a `lifecycle_manager`, and a
-conductor application that can drive transitions and wait for Active could
-replace that manager with something whose ordering comes from the graph. The
-runtime already speaks the lifecycle protocol as a server, and the fleet
-rollout already knows how to wait for Active; this is the missing third use
-of the same machinery.
+**Externals from a live graph.** `conductor.json` claims what exists outside
+the application, and the checker trusts that claim completely — so a wrong
+type or QoS is silence at runtime, exactly what the checker exists to prevent.
+The answer is to stop hand-writing it: introspect a running system and emit
+the block (`conductor externals -from-graph`), diffing it against what is
+declared. That is also the adoption path into an existing stack, which is a
+larger prize than the convenience.
 
-A **MoveIt example** is the harder one, and useful for a second reason: its
+**A lifecycle client.** Nav2's nodes are managed nodes driven by a
+`lifecycle_manager`, and the example drives that manager over its
+`manage_nodes` service — one service call standing in for the ordering
+Conductor already derives. A first-class client (drive a transition, wait for
+Active, report which of a set is not up) could replace the manager with
+something whose order comes from the graph. The runtime already speaks the
+protocol as a server, the fleet rollout already waits for Active, and the
+example is now the third caller of the same machinery.
+
+**A MoveIt example** is the harder one, and useful for a second reason: its
 interfaces (`moveit_msgs/action/MoveGroup`, the planning scene, joint
 trajectories) are the largest nested messages in common use, so it is a real
 stress test of the CDR codec and of msggen on deeply nested arrays. The
@@ -562,8 +640,15 @@ tests from real robot data without a simulator at all.
 
 ### Smaller things worth doing
 
-- **Externals from a live graph** (above): the adoption path into an existing
-  stack, and the thing that makes a Nav2 example bearable.
+- **Trace context from off-executor goroutines** (see Nav2 above): a mission
+  step's or action handler's publish loses the trace, so a fleet view of a
+  mission-driven application shows roots where it should show a chain. The
+  choice is between an explicit publish-site context and a per-step fallback.
+- **Goal rejection**: the action server accepts every goal and reports refusal
+  through the result, because a handler is only called after acceptance. Real
+  servers reject — "the stack is not active", "that pose is off the map" —
+  before accepting, and `ErrGoalRejected` exists on the client already with
+  nothing on the server able to cause it.
 - **Transient-local latching**: still the known gap in the runtime. It now has
   two dependents that matter — `tf_static` (republished at 1 Hz as a
   stand-in) and `/robot_description` — which is enough to promote it from

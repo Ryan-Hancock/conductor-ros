@@ -1,0 +1,6 @@
+{
+  "dynamic": [
+    {"parent": "map", "child": "odom", "by": "this stand-in (amcl's job)"},
+    {"parent": "odom", "child": "base_link", "by": "this stand-in (odometry's job)"}
+  ]
+}

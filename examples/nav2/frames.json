@@ -1,0 +1,11 @@
+{
+  "dynamic": [
+    {"parent": "map", "child": "odom", "by": "amcl"},
+    {"parent": "odom", "child": "base_footprint", "by": "gazebo (wheel odometry)"},
+    {"parent": "base_footprint", "child": "base_link", "by": "robot_state_publisher"},
+    {"parent": "base_link", "child": "base_scan", "by": "robot_state_publisher"},
+    {"parent": "base_link", "child": "imu_link", "by": "robot_state_publisher"},
+    {"parent": "base_link", "child": "wheel_left_link", "by": "robot_state_publisher"},
+    {"parent": "base_link", "child": "wheel_right_link", "by": "robot_state_publisher"}
+  ]
+}

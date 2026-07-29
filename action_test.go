@@ -1,6 +1,7 @@
 package conductor
 
 import (
+	"errors"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -164,6 +165,44 @@ func TestActionClientRoundTrip(t *testing.T) {
 	// Result is idempotent.
 	if _, s2, err := h.Result(); err != nil || s2 != status {
 		t.Errorf("second Result() = %s, %v; want %s, nil", s2, err, status)
+	}
+}
+
+// Refuser2 aborts every goal, reporting how far it got — the shape every
+// real interface has, where the reason for failure lives in the result.
+type Refuser2 struct {
+	Count Action[countGoal, countFeedback, countResult] `action:"refuse"`
+}
+
+func (r *Refuser2) OnCount(g *Goal[countGoal, countFeedback]) (countResult, error) {
+	return countResult{Reached: 3}, errors.New("cannot go further")
+}
+
+type RefusedDriver struct {
+	Count ActionClient[countGoal, countFeedback, countResult] `action:"refuse" timeout:"10s"`
+}
+
+// An aborted goal delivers the server's result as well as its status.
+// nav2_msgs/action/NavigateToPose puts error_code and error_msg there and
+// nowhere else, so a client that only learned "aborted" would be told a
+// failure happened without being told what it was.
+func TestActionAbortCarriesItsResult(t *testing.T) {
+	drv := &RefusedDriver{}
+	newTestApp(t, &Refuser2{}, drv)
+
+	h, err := drv.Count.SendGoal(countGoal{Target: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, status, err := h.Result()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status != StatusAborted {
+		t.Fatalf("status = %s, want ABORTED", status)
+	}
+	if res.Reached != 3 {
+		t.Fatalf("aborted result = %d, want the 3 the handler reported", res.Reached)
 	}
 }
 

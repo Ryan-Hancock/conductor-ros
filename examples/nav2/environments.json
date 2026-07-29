@@ -1,0 +1,48 @@
+{
+  "default": "stub",
+  "environments": {
+    "stub": {
+      "transport": "zenoh",
+      "endpoint": "tcp/127.0.0.1:7447",
+      "deploy": {"tags": ["zenoh"], "cgo": true},
+      "requires": [
+        {
+          "name": "router",
+          "run": "$CONDUCTOR_OVERLAY/lib/rmw_zenoh_cpp/rmw_zenohd",
+          "ready": {"endpoint": "tcp/127.0.0.1:7447"}
+        },
+        {
+          "name": "nav2stub",
+          "run": "go run -tags zenoh ../nav2stub -transport zenoh -zenoh-endpoint tcp/127.0.0.1:7447 -dashboard 127.0.0.1:4900",
+          "ready": {"endpoint": "127.0.0.1:4900"},
+          "ready_timeout": "90s"
+        }
+      ]
+    },
+    "sim": {
+      "transport": "zenoh",
+      "endpoint": "tcp/127.0.0.1:7447",
+      "deploy": {"tags": ["zenoh"], "cgo": true},
+      "requires": [
+        {
+          "name": "router",
+          "run": "$CONDUCTOR_OVERLAY/lib/rmw_zenoh_cpp/rmw_zenohd",
+          "ready": {"endpoint": "tcp/127.0.0.1:7447"}
+        },
+        {
+          "name": "nav2",
+          "run": "ros2 launch nav2_bringup tb3_simulation_launch.py autostart:=False headless:=True",
+          "env": {"TURTLEBOT3_MODEL": "waffle"},
+          "ready": {"command": "ros2 service list | grep -q lifecycle_manager_navigation/manage_nodes"},
+          "ready_timeout": "180s"
+        },
+        {
+          "name": "battery",
+          "run": "ros2 topic pub -r 1 /battery_state sensor_msgs/msg/BatteryState '{percentage: 0.85, present: true}'",
+          "ready": {"command": "ros2 topic list | grep -q /battery_state"},
+          "ready_timeout": "60s"
+        }
+      ]
+    }
+  }
+}

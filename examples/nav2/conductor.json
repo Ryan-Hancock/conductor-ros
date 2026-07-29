@@ -1,0 +1,55 @@
+{
+  "app": "nav2",
+  "externals": [
+    {
+      "topic": "navigate_to_pose",
+      "type": "nav2_msgs/action/NavigateToPose",
+      "role": "action_server"
+    },
+    {
+      "topic": "backup",
+      "type": "nav2_msgs/action/BackUp",
+      "role": "action_server"
+    },
+    {
+      "topic": "spin",
+      "type": "nav2_msgs/action/Spin",
+      "role": "action_server"
+    },
+    {
+      "topic": "lifecycle_manager_navigation/manage_nodes",
+      "type": "nav2_msgs/srv/ManageLifecycleNodes",
+      "role": "server"
+    },
+    {
+      "topic": "initialpose",
+      "type": "geometry_msgs/msg/PoseWithCovarianceStamped",
+      "role": "subscriber",
+      "qos": "reliable"
+    },
+    {
+      "topic": "amcl_pose",
+      "type": "geometry_msgs/msg/PoseWithCovarianceStamped",
+      "role": "publisher",
+      "qos": "transient"
+    },
+    {
+      "topic": "cmd_vel",
+      "type": "geometry_msgs/msg/TwistStamped",
+      "role": "publisher",
+      "qos": "reliable"
+    },
+    {
+      "topic": "battery_state",
+      "type": "sensor_msgs/msg/BatteryState",
+      "role": "publisher",
+      "qos": "sensor"
+    },
+    {
+      "topic": "diagnostics",
+      "type": "diagnostic_msgs/msg/DiagnosticArray",
+      "role": "subscriber",
+      "qos": "reliable"
+    }
+  ]
+}

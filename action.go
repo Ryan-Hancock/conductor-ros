@@ -40,7 +40,9 @@ func (g *Goal[G, F]) Feedback(f F) { g.sendFeedback(f) }
 // under <name>/_action/). The owning node must define a handler method named
 // On<FieldName> with signature func(*Goal[G, F]) (R, error); it runs on a
 // dedicated goroutine per goal. Returning an error aborts the goal (or
-// completes cancellation if the goal's context was canceled).
+// completes cancellation if the goal's context was canceled); the result
+// returned alongside it is still delivered to the client, which is where
+// interfaces like nav2_msgs/action/NavigateToPose keep their error codes.
 //
 // Tags: action (required) — the action name.
 type Action[G, F, R any] struct {
@@ -185,7 +187,13 @@ func (s *actionServer[G, F, R]) handleSendGoal(reqAny any) (any, error) {
 			rec.status = goalStatusCanceled
 			rec.result = result // canceled goals report the handler's partial result
 		case err != nil:
+			// An aborted goal reports its result too. This is not a detail:
+			// the interfaces in common use put the reason for failure in the
+			// result and nowhere else — nav2_msgs/action/NavigateToPose
+			// carries error_code and error_msg — so dropping it would leave a
+			// client knowing only that something went wrong.
 			rec.status = goalStatusAborted
+			rec.result = result
 			slog.Warn("conductor: goal aborted", "action", s.action, "err", err)
 		default:
 			rec.status = goalStatusSucceeded

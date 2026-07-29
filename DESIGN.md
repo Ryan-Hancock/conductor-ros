@@ -169,7 +169,7 @@ consolidation explicitly, with a comment) are the exact places bugs hide.
 | Services | boilerplate | `Svc[Req,Res]` / `Client[Req,Res]` fields, graph-validated, rmw_zenoh querier/queryable wire format, `.srv` codegen | ✅ v0.4 |
 | Actions (server) | boilerplate | `Action[G,F,R]` fields over the 3-service/2-topic convention; goal state machine, per-goal goroutines, context cancellation; `.action` codegen | ✅ v0.5 |
 | Actions (client, e.g. calling Nav2) | boilerplate | `ActionClient[G,F,R]` with goal handles, feedback channels, cancellation | ✅ v0.6 |
-| Observability | `/rosout` + prayer | a span per callback with W3C trace context propagated through messages; Prometheus metrics per node/topic/callback | ✅ v0.8 |
+| Observability | `/rosout` + prayer | a span per callback with W3C trace context propagated through messages; Prometheus metrics per node/topic/callback; a built-in dashboard (graph, live rates, lifecycle, parameters, traces) served by the app itself | ✅ v0.8, dashboard v1.2 |
 | Testing | `launch_testing` | the whole app inside `go test`: in-process transport, deterministic timers, settle-not-sleep, typed publish/record/call | ✅ v1.0 |
 | Deployment | colcon + rosdep + apt | `conductor deploy`: cross-compiled binary, release bundle with a manifest, systemd units whose ordering is the graph's bringup order, ssh install, rollback | ✅ v1.1 |
 | Per-env config (sim/dev/robot-N) | copy-pasted YAML | `environments.json`: per-environment externals, transport, parameter overlays and deploy target; `check/graph/build/deploy -env` | ✅ v1.1 |
@@ -203,6 +203,34 @@ an optional HTTP endpoint — no client library dependency, since the
 exposition format is a few lines to write. Message counts, callback
 latency sums, service outcomes, and lifecycle state per node, all with no
 user code.
+
+**The dashboard (v1.2).** Encore's local development dashboard is the part
+developers actually feel, and the same argument applies here: the runtime
+wired every endpoint, owns every callback, and already propagates trace
+context, so it can *show* the application instead of leaving a developer to
+reconstruct it from `ros2 topic hz` in one terminal and `ros2 param get` in
+another. `-dashboard :4000` serves the graph in bringup order, a live card
+per node, editable parameters, lifecycle controls, the metric table, and —
+with `-dashboard-traces N` — recent traces nested as causal chains.
+
+Three decisions worth recording:
+
+- **The runtime describes itself.** Binding already knows each endpoint's
+  name, type, QoS and rate, so it records an inventory (`inventory.go`)
+  rather than the dashboard re-deriving one. The static view (`conductor
+  check`) and this live view are again two projections of one set of
+  declarations — but this one reports what a process actually has open.
+- **Counters out, rates in the page.** The API exposes absolute counters and
+  a server timestamp; the page divides successive snapshots. The runtime
+  never has to choose a rate window, and pausing the page pauses the maths.
+- **Writes go through the existing paths.** A parameter edit calls the same
+  handle `ros2 param set` uses, so type checking is identical; a lifecycle
+  button calls the same transition `ros2 lifecycle set` does. The dashboard
+  is a view over the runtime, not a second way to change it.
+
+Tracing stays opt-in — a span per callback is not free — and the page is one
+embedded self-contained file, because the machine that most needs the view is
+a robot with no route to a CDN.
 
 ## Testing (v1.0, implemented)
 

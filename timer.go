@@ -6,6 +6,7 @@ import (
 	"reflect"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
@@ -17,6 +18,7 @@ import (
 // time.ParseDuration period ("250ms").
 type Timer struct {
 	period time.Duration
+	fired  atomic.Uint64
 }
 
 // Period returns the wired period (zero before Run).
@@ -42,10 +44,13 @@ func (t *Timer) bind(rt *runtimeState, nr *nodeRuntime, field reflect.StructFiel
 	t.period = period
 	name := field.Name
 	fire := func() {
+		t.fired.Add(1)
 		// A timer starts a fresh trace: nothing caused it but the clock.
 		nr.runInstrumented(SpanTimer, name, TraceContext{}, h)
 	}
 	rt.timers = append(rt.timers, &timerHandle{period: period, node: nr, fire: fire})
+	rt.recordEndpoint(Endpoint{Node: nr.name, Kind: EndpointTimer, Field: field.Name, Name: name,
+		Rate: rate, count: countOf(t.fired.Load)})
 	return nil
 }
 

@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"reflect"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -74,6 +75,7 @@ type ActionClient[G, F, R any] struct {
 
 	mu      sync.Mutex
 	pending map[uuidMsg]chan F
+	sent    atomic.Uint64
 }
 
 // Name returns the wired action name (empty before Run).
@@ -125,6 +127,7 @@ func (c *ActionClient[G, F, R]) SendGoal(goal G) (*GoalHandle[F, R], error) {
 	if c.sendGoal == nil {
 		panic("conductor: SendGoal on an action client that was not wired by Run")
 	}
+	c.sent.Add(1)
 	var id uuidMsg
 	if _, err := rand.Read(id.Uuid[:]); err != nil {
 		return nil, err
@@ -201,6 +204,8 @@ func (c *ActionClient[G, F, R]) bind(rt *runtimeState, nr *nodeRuntime, field re
 	c.timeout = timeout
 	c.pending = map[uuidMsg]chan F{}
 	rt.recordConsumes(nr.name, name)
+	rt.recordEndpoint(Endpoint{Node: nr.name, Kind: EndpointActionClient, Field: field.Name, Name: name,
+		Type: info.Name, count: countOf(c.sent.Load)})
 	base := name + "/_action/"
 
 	clients := []struct {

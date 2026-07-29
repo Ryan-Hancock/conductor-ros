@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"sync/atomic"
 )
 
 // Svc declares a service server. The owning node must define a handler
@@ -15,6 +16,7 @@ import (
 // Tags: service (required) — the service name.
 type Svc[Req, Res any] struct {
 	service string
+	served  atomic.Uint64
 }
 
 // Service returns the wired service name (empty before Run).
@@ -43,6 +45,8 @@ func (s *Svc[Req, Res]) bind(rt *runtimeState, nr *nodeRuntime, field reflect.St
 		Node:    nr.name,
 	}
 	rt.recordProvides(nr.name, service)
+	rt.recordEndpoint(Endpoint{Node: nr.name, Kind: EndpointService, Field: field.Name, Name: service,
+		Type: rosServiceName(reflect.TypeFor[Req](), reflect.TypeFor[Res]()), count: countOf(s.served.Load)})
 	handle := func(req any) (any, error) {
 		type result struct {
 			res Res
@@ -64,6 +68,7 @@ func (s *Svc[Req, Res]) bind(rt *runtimeState, nr *nodeRuntime, field reflect.St
 				outcome = "error"
 			}
 			counter("conductor_service_requests_total", "node", nr.name, "service", service, "outcome", outcome).Add(1)
+			s.served.Add(1)
 			if r.err != nil {
 				return nil, r.err
 			}

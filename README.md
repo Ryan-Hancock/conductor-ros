@@ -366,6 +366,48 @@ conductor_callback_duration_sum_seconds{node="navigator",kind="subscription",nam
 conductor_node_lifecycle_state{node="navigator"} 3
 ```
 
+## The dashboard
+
+The runtime knows the graph, owns every callback, and already propagates
+trace context — so it can show you the application rather than make you
+reconstruct it from `ros2 topic hz` in one terminal and `ros2 param get` in
+another. One flag, and the app serves its own portal:
+
+```sh
+make dashboard        # or: ./patrol -dashboard :4000 -dashboard-traces 500
+```
+
+![the conductor dashboard](docs/dashboard.png)
+
+- **The graph**, laid out in the bringup order the framework derived, with
+  edges live-coloured by what is actually flowing and the ROS graph beyond
+  this process drawn dashed.
+- **A card per node**: lifecycle state, callbacks/s, mailbox depth and drops,
+  and every declaration it wired — topic, ROS type, QoS profile, and its own
+  message count and rate.
+- **Parameters are editable in place.** The field goes through the same
+  handle `ros2 param set` does, so type checking is identical: putting
+  `quick` in a `float64` is refused with `strconv.ParseFloat: parsing
+  "quick"`. So are the **lifecycle buttons** — deactivate a node from the
+  browser and watch its publisher go quiet, exactly as `ros2 lifecycle set`
+  would.
+- **Traces as causal chains.** `-dashboard-traces N` keeps the last N spans
+  in a ring buffer and the view nests them by parent, so one timer tick reads
+  as `localizer/Clock → navigator/amcl_pose → safety_monitor/cmd_vel` with
+  the real microsecond offsets. This is the view the trace propagation was
+  built for.
+- **Every metric**, filterable, with per-second rates derived in the page —
+  and `/metrics` still served alongside for Prometheus.
+
+Tracing is opt-in because a span per callback is not free; without
+`-dashboard-traces` everything else works and the trace panel says so. The
+page is one embedded, self-contained file: no CDN, no build step, and nothing
+to install next to it — which is what makes it usable over ssh to a robot on
+a network with no route to the internet.
+
+Scope is deliberately one process: in a per-node deployment each unit serves
+its own dashboard, showing what that unit really has open.
+
 ## Testing
 
 Testing a ROS application usually means `launch_testing`: bring up real

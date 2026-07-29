@@ -66,5 +66,7 @@ func (p *Pub[T]) bind(rt *runtimeState, nr *nodeRuntime, field reflect.StructFie
 	p.publish = publish
 	p.node = nr
 	rt.recordProvides(nr.name, topic)
+	rt.recordEndpoint(Endpoint{Node: nr.name, Kind: EndpointPub, Field: field.Name, Name: topic,
+		Type: rosTypeName(reflect.TypeFor[T]()), QoS: q.Name, count: countOf(p.sent.Load)})
 	return nil
 }

@@ -1,0 +1,405 @@
+<!doctype html>
+<!-- Served by the conductor runtime. Self-contained: no CDN, no build step. -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>conductor</title>
+<style>
+:root {
+  color-scheme: light dark;
+  --bg: #fbfbfa; --panel: #fff; --line: #e4e4e0; --ink: #1c1c1a; --dim: #6b6b66;
+  --accent: #2f6f4f; --warn: #b4551d; --bad: #a3282d; --chip: #f0f0ec;
+  --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #131413; --panel: #1b1c1b; --line: #2c2e2c; --ink: #e8e8e4; --dim: #9a9a94;
+    --accent: #6fbf90; --warn: #e0913f; --bad: #e0666b; --chip: #262826;
+  }
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0; background: var(--bg); color: var(--ink);
+  font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+}
+header {
+  display: flex; align-items: baseline; gap: 16px; flex-wrap: wrap;
+  padding: 14px 20px; border-bottom: 1px solid var(--line); background: var(--panel);
+  position: sticky; top: 0; z-index: 10;
+}
+h1 { font-size: 15px; margin: 0; font-weight: 600; letter-spacing: -0.01em; }
+h1 span { color: var(--dim); font-weight: 400; }
+.meta { color: var(--dim); font-size: 12px; display: flex; gap: 14px; flex-wrap: wrap; }
+.meta b { font-weight: 500; color: var(--ink); }
+.spacer { flex: 1; }
+.live { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--dim); }
+.dot { width: 7px; height: 7px; border-radius: 50%; background: var(--accent); }
+.dot.paused { background: var(--dim); }
+button {
+  font: inherit; font-size: 12px; padding: 3px 10px; border-radius: 5px;
+  border: 1px solid var(--line); background: var(--panel); color: var(--ink); cursor: pointer;
+}
+button:hover { border-color: var(--dim); }
+main { padding: 20px; display: grid; gap: 20px; max-width: 1500px; }
+section { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; }
+section > h2 {
+  font-size: 12px; text-transform: uppercase; letter-spacing: 0.07em; color: var(--dim);
+  margin: 0; padding: 11px 16px; border-bottom: 1px solid var(--line); font-weight: 600;
+}
+.body { padding: 14px 16px; overflow-x: auto; }
+table { border-collapse: collapse; width: 100%; font-size: 13px; }
+th { text-align: left; font-weight: 500; color: var(--dim); font-size: 11px;
+     text-transform: uppercase; letter-spacing: 0.05em; padding: 0 12px 6px 0; white-space: nowrap; }
+td { padding: 5px 12px 5px 0; border-top: 1px solid var(--line); vertical-align: top; }
+td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+code, .mono { font-family: var(--mono); font-size: 12px; }
+.chip {
+  display: inline-block; padding: 1px 7px; border-radius: 4px; background: var(--chip);
+  font-size: 11px; font-family: var(--mono); color: var(--dim);
+}
+.state { font-weight: 600; font-size: 11px; letter-spacing: 0.03em; text-transform: uppercase; }
+.state.active { color: var(--accent); }
+.state.inactive, .state.unconfigured { color: var(--warn); }
+.state.finalized, .state.errorprocessing { color: var(--bad); }
+.nodes { display: grid; grid-template-columns: repeat(auto-fill, minmax(330px, 1fr)); gap: 14px; padding: 14px 16px; }
+.node { border: 1px solid var(--line); border-radius: 7px; padding: 12px 13px; }
+.node h3 { margin: 0 0 2px; font-size: 14px; font-weight: 600; display: flex; align-items: center; gap: 8px; }
+.node .sub { color: var(--dim); font-size: 11px; margin-bottom: 9px; }
+.ep { display: grid; grid-template-columns: 74px 1fr auto; gap: 8px; align-items: baseline;
+      padding: 3px 0; border-top: 1px dotted var(--line); }
+.ep .kind { color: var(--dim); font-size: 10px; text-transform: uppercase; letter-spacing: 0.05em; }
+.ep .name { font-family: var(--mono); font-size: 12px; overflow-wrap: anywhere; }
+.ep .name em { color: var(--dim); font-style: normal; font-size: 11px; }
+.ep .rate { font-variant-numeric: tabular-nums; color: var(--dim); font-size: 11px; white-space: nowrap; }
+.ep .rate b { color: var(--ink); font-weight: 600; }
+.params { margin-top: 9px; border-top: 1px solid var(--line); padding-top: 8px; }
+.param { display: flex; align-items: center; gap: 8px; padding: 2px 0; }
+.param label { font-family: var(--mono); font-size: 12px; flex: 1; }
+.param input { font: inherit; font-family: var(--mono); font-size: 12px; width: 90px;
+  padding: 2px 6px; border: 1px solid var(--line); border-radius: 4px;
+  background: var(--bg); color: var(--ink); }
+.param input.saved { border-color: var(--accent); }
+.param input.bad { border-color: var(--bad); }
+.lifecycle { display: flex; gap: 5px; margin-top: 10px; }
+.lifecycle button { font-size: 11px; padding: 2px 8px; }
+svg { display: block; width: 100%; height: auto; }
+.edge { stroke: var(--line); stroke-width: 1.5; fill: none; }
+.edge.busy { stroke: var(--accent); }
+.nodebox { fill: var(--chip); stroke: var(--line); }
+.nodelabel { font: 600 12px -apple-system, sans-serif; fill: var(--ink); }
+.topiclabel { font: 11px var(--mono); fill: var(--dim); }
+.trace { border-top: 1px solid var(--line); padding: 8px 0; }
+.trace:first-child { border-top: 0; }
+.trace .hdr { display: flex; gap: 10px; align-items: baseline; font-size: 12px; color: var(--dim); }
+.span { display: flex; align-items: center; gap: 8px; padding: 1px 0; font-size: 12px; }
+.span .label { font-family: var(--mono); white-space: nowrap; }
+.span .bar { height: 9px; border-radius: 2px; background: var(--accent); opacity: 0.8; min-width: 2px; }
+.span .track { flex: 1; position: relative; height: 9px; background: var(--chip); border-radius: 2px; }
+.span .track > div { position: absolute; top: 0; height: 9px; border-radius: 2px; background: var(--accent); min-width: 2px; }
+.kind-timer .track > div { background: var(--warn); }
+.kind-service .track > div, .kind-action .track > div { background: #7a6fd0; }
+.empty { color: var(--dim); font-size: 13px; padding: 4px 0; }
+.filter { font: inherit; font-size: 12px; padding: 3px 8px; border: 1px solid var(--line);
+  border-radius: 5px; background: var(--bg); color: var(--ink); width: 220px; }
+.hdrrow { display: flex; align-items: center; gap: 10px; padding: 9px 16px; border-bottom: 1px solid var(--line); }
+.hdrrow h2 { border: 0; padding: 0; margin: 0; flex: 1; font-size: 12px; text-transform: uppercase;
+  letter-spacing: 0.07em; color: var(--dim); font-weight: 600; }
+</style>
+</head>
+<body>
+<header>
+  <h1 id="appname">conductor</h1>
+  <div class="meta" id="meta"></div>
+  <div class="spacer"></div>
+  <div class="live"><span class="dot" id="dot"></span><span id="livetext">live</span></div>
+  <button id="pause">pause</button>
+</header>
+
+<main>
+  <section>
+    <h2>graph</h2>
+    <div class="body"><svg id="graph"></svg></div>
+  </section>
+
+  <section>
+    <h2>nodes</h2>
+    <div class="nodes" id="nodes"></div>
+  </section>
+
+  <section>
+    <h2>topics</h2>
+    <div class="body">
+      <table>
+        <thead><tr><th>topic</th><th>type</th><th>qos</th><th>publishers</th><th>subscribers</th>
+          <th class="num">sent</th><th class="num">received</th><th class="num">msg/s</th></tr></thead>
+        <tbody id="topics"></tbody>
+      </table>
+    </div>
+  </section>
+
+  <section>
+    <div class="hdrrow"><h2>traces</h2><span class="chip" id="tracehint"></span></div>
+    <div class="body" id="traces"></div>
+  </section>
+
+  <section>
+    <div class="hdrrow">
+      <h2>metrics</h2>
+      <input class="filter" id="mfilter" placeholder="filter metrics…">
+      <a class="chip" href="/metrics">/metrics</a>
+    </div>
+    <div class="body">
+      <table>
+        <thead><tr><th>metric</th><th>labels</th><th class="num">value</th><th class="num">per second</th></tr></thead>
+        <tbody id="metrics"></tbody>
+      </table>
+    </div>
+  </section>
+</main>
+
+<script>
+"use strict";
+const $ = (id) => document.getElementById(id);
+let paused = false, prev = null, prevAt = 0, rates = new Map();
+
+$("pause").onclick = () => {
+  paused = !paused;
+  $("pause").textContent = paused ? "resume" : "pause";
+  $("dot").classList.toggle("paused", paused);
+  $("livetext").textContent = paused ? "paused" : "live";
+  if (!paused) tick();
+};
+
+// Rates are computed here, from successive snapshots, so the runtime keeps
+// exposing plain counters and never has to pick a window.
+function rate(key, value, dt) {
+  const before = rates.get(key);
+  rates.set(key, value);
+  if (before === undefined || dt <= 0 || value < before) return null;
+  return (value - before) / dt;
+}
+const fmtRate = (r) => r === null ? "" : (r >= 100 ? r.toFixed(0) : r >= 10 ? r.toFixed(1) : r.toFixed(2));
+const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+
+function renderHeader(s) {
+  $("appname").innerHTML = esc(s.app.name) + ' <span>' + esc(s.app.transport) + '</span>';
+  const up = s.app.uptime_seconds;
+  const uptime = up < 90 ? up.toFixed(0) + "s" : up < 5400 ? (up / 60).toFixed(1) + "m" : (up / 3600).toFixed(1) + "h";
+  $("meta").innerHTML = [
+    ["host", s.app.host], ["pid", s.app.pid], ["uptime", uptime],
+    ["nodes", s.nodes.length], ["bringup", s.app.bringup_order.join(" → ")],
+  ].map(([k, v]) => `${k} <b>${esc(v)}</b>`).join("");
+}
+
+// The graph is laid out in bringup order: providers left, consumers right,
+// which is the same ordering the launch file and the systemd units encode.
+function renderGraph(s, flows) {
+  const svg = $("graph");
+  const order = s.app.bringup_order;
+  const col = new Map(order.map((n, i) => [n, i]));
+  const external = [];
+  for (const t of s.topics) {
+    if (!t.pubs.length) external.push({ topic: t, side: "in" });
+    else if (!t.subs.length) external.push({ topic: t, side: "out" });
+  }
+  const W = 168, H = 42, GAPX = 92, GAPY = 26, PAD = 8;
+  const hasIn = external.some(e => e.side === "in"), hasOut = external.some(e => e.side === "out");
+  const cols = order.length + (hasIn ? 1 : 0) + (hasOut ? 1 : 0);
+  const offset = hasIn ? 1 : 0;
+  const rows = new Map();
+  const place = (name, c) => {
+    const r = rows.get(c) || 0; rows.set(c, r + 1);
+    return { x: PAD + c * (W + GAPX), y: PAD + r * (H + GAPY), name };
+  };
+  const pos = new Map();
+  if (hasIn) pos.set("(external in)", place("(external in)", 0));
+  order.forEach((n) => pos.set(n, place(n, col.get(n) + offset)));
+  if (hasOut) pos.set("(external out)", place("(external out)", cols - 1));
+
+  const width = PAD * 2 + cols * (W + GAPX) - GAPX;
+  const nodeRows = Math.max(...[...rows.values()], 1);
+  const bottom = PAD + nodeRows * (H + GAPY);
+
+  // An edge between adjacent columns fits in the gap. One that skips a
+  // column would otherwise be drawn straight through the boxes in between,
+  // so it is routed below the row, in its own lane.
+  let out = "", lanes = 0;
+  for (const t of s.topics) {
+    const froms = t.pubs.length ? t.pubs : ["(external in)"];
+    const tos = t.subs.length ? t.subs : ["(external out)"];
+    for (const f of froms) for (const to of tos) {
+      const a = pos.get(f), b = pos.get(to);
+      if (!a || !b) continue;
+      const x1 = a.x + W, y1 = a.y + H / 2, x2 = b.x, y2 = b.y + H / 2;
+      const busy = (flows.get(t.name) || 0) > 0;
+      const cls = `edge${busy ? " busy" : ""}`;
+      const far = Math.abs(x2 - x1) > W + GAPX * 1.5 || a.y !== b.y;
+      let d, lx, ly;
+      if (far) {
+        const dip = bottom + 6 + lanes++ * 20;
+        d = `M${x1},${y1} C${x1 + 40},${dip} ${x2 - 40},${dip} ${x2},${y2}`;
+        lx = (x1 + x2) / 2; ly = dip - 4;
+      } else {
+        const mid = (x1 + x2) / 2;
+        d = `M${x1},${y1} C${mid},${y1} ${mid},${y2} ${x2},${y2}`;
+        lx = mid; ly = (y1 + y2) / 2 - 6;
+      }
+      out += `<path class="${cls}" d="${d}" marker-end="url(#arrow)"/>`;
+      out += `<text class="topiclabel" x="${lx}" y="${ly}" text-anchor="middle">${esc(t.name)}</text>`;
+    }
+  }
+  const height = bottom + (lanes ? lanes * 20 + 14 : 0);
+  for (const [name, p] of pos) {
+    const ext = name.startsWith("(external");
+    out += `<rect class="nodebox" x="${p.x}" y="${p.y}" width="${W}" height="${H}" rx="7"${ext ? ' stroke-dasharray="4 3"' : ""}/>`;
+    out += `<text class="nodelabel" x="${p.x + W / 2}" y="${p.y + H / 2 + 4}" text-anchor="middle">${esc(ext ? "ROS graph" : name)}</text>`;
+  }
+  svg.setAttribute("viewBox", `0 0 ${width} ${height}`);
+  svg.style.maxHeight = height + "px";
+  svg.innerHTML = `<defs><marker id="arrow" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6"
+    orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="currentColor" opacity="0.35"/></marker></defs>` + out;
+}
+
+function renderNodes(s, dt) {
+  $("nodes").innerHTML = s.nodes.map((n) => {
+    const eps = n.endpoints.map((e) => {
+      const r = rate(`ep:${n.name}:${e.kind}:${e.name}`, e.counts, dt);
+      const detail = e.type ? `<em> ${esc(e.type)}</em>` : e.rate ? `<em> ${esc(e.rate)}</em>` : "";
+      const qos = e.qos ? ` <span class="chip">${esc(e.qos)}</span>` : "";
+      return `<div class="ep"><span class="kind">${esc(e.kind)}</span>
+        <span class="name">${esc(e.name)}${qos}${detail}</span>
+        <span class="rate">${e.counts}${r ? ` &middot; <b>${fmtRate(r)}/s</b>` : ""}</span></div>`;
+    }).join("");
+    const params = n.params.length ? `<div class="params">${n.params.map((p) =>
+      `<div class="param"><label>${esc(p.name)} <span class="chip">${esc(p.type)}</span></label>
+       <input data-node="${esc(n.name)}" data-param="${esc(p.name)}" value="${esc(p.value)}"></div>`).join("")}</div>` : "";
+    const proc = rate(`node:${n.name}`, n.processed, dt);
+    return `<div class="node">
+      <h3>${esc(n.name)} <span class="state ${esc(n.state.toLowerCase())}">${esc(n.state)}</span></h3>
+      <div class="sub">${n.processed} callbacks${proc ? ` &middot; ${fmtRate(proc)}/s` : ""}
+        &middot; mailbox ${n.mailbox_depth}/${n.mailbox_cap}
+        ${n.dropped ? `&middot; <b style="color:var(--bad)">${n.dropped} dropped</b>` : ""}
+        ${n.depends_on.length ? `&middot; after ${esc(n.depends_on.join(", "))}` : ""}</div>
+      ${eps}${params}
+      <div class="lifecycle">
+        <button data-lc="${esc(n.name)}" data-t="activate">activate</button>
+        <button data-lc="${esc(n.name)}" data-t="deactivate">deactivate</button>
+      </div></div>`;
+  }).join("");
+
+  for (const input of document.querySelectorAll(".param input")) {
+    if (document.activeElement === input) continue;
+    input.onchange = async (ev) => {
+      const el = ev.target;
+      const res = await fetch("/api/params", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ node: el.dataset.node, name: el.dataset.param, value: el.value }),
+      });
+      el.classList.toggle("bad", !res.ok);
+      el.classList.toggle("saved", res.ok);
+      if (!res.ok) el.title = await res.text();
+      setTimeout(() => el.classList.remove("saved", "bad"), 1200);
+    };
+  }
+  for (const b of document.querySelectorAll("[data-lc]")) {
+    b.onclick = async () => {
+      const res = await fetch("/api/lifecycle", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ node: b.dataset.lc, transition: b.dataset.t }),
+      });
+      if (!res.ok) alert(await res.text());
+      tick();
+    };
+  }
+}
+
+function renderTopics(s, dt, flows) {
+  $("topics").innerHTML = s.topics.map((t) => {
+    const r = flows.get(t.name);
+    const ext = (list) => list.length ? esc(list.join(", ")) : '<span class="chip">ROS graph</span>';
+    return `<tr><td class="mono">${esc(t.name)}</td><td class="mono">${esc(t.type || "")}</td>
+      <td><span class="chip">${esc(t.qos || "")}</span></td>
+      <td>${ext(t.pubs)}</td><td>${ext(t.subs)}</td>
+      <td class="num">${t.sent}</td><td class="num">${t.received}</td>
+      <td class="num">${fmtRate(r)}</td></tr>`;
+  }).join("") || `<tr><td colspan="8" class="empty">no topics</td></tr>`;
+}
+
+function renderTraces(s) {
+  const box = $("traces");
+  if (!s.app.tracing) {
+    $("tracehint").textContent = "run with -dashboard-traces to record";
+    box.innerHTML = '<div class="empty">Tracing is off: a span per callback is not free, so the trace view is opt-in.</div>';
+    return;
+  }
+  const shown = s.traces.slice(0, 12);
+  $("tracehint").textContent = s.traces.length > shown.length
+    ? `${shown.length} of ${s.traces.length} recent` : `${s.traces.length} recent`;
+  box.innerHTML = shown.map((t) => {
+    const scale = Math.max(t.duration_ms, 0.001);
+    const spans = t.spans.map((sp) => {
+      const left = (sp.offset_ms / scale) * 100, w = Math.max((sp.duration_ms / scale) * 100, 0.6);
+      return `<div class="span kind-${esc(sp.kind)}">
+        <span class="label" style="padding-left:${sp.depth * 12}px">${esc(sp.node)} <span class="chip">${esc(sp.name)}</span></span>
+        <span class="track"><div style="left:${left}%;width:${w}%"></div></span>
+        <span class="label">${sp.duration_ms.toFixed(2)}ms</span></div>`;
+    }).join("");
+    return `<div class="trace"><div class="hdr"><code>${esc(t.id.slice(0, 16))}…</code>
+      <span>${new Date(t.start).toLocaleTimeString()}</span>
+      <span>${t.duration_ms.toFixed(2)}ms</span><span>${t.spans.length} spans</span></div>${spans}</div>`;
+  }).join("") || '<div class="empty">No traces recorded yet.</div>';
+}
+
+function renderMetrics(s, dt) {
+  const filter = $("mfilter").value.toLowerCase();
+  const rows = s.metrics.filter((m) => {
+    if (!filter) return true;
+    return (m.name + JSON.stringify(m.labels || {})).toLowerCase().includes(filter);
+  }).map((m) => {
+    const labels = Object.entries(m.labels || {}).map(([k, v]) => `${k}=${v}`).join(" ");
+    const r = m.kind === "counter" || m.name.endsWith("_count")
+      ? rate("m:" + m.name + labels, m.value, dt) : null;
+    return `<tr><td class="mono">${esc(m.name)}</td><td class="mono" style="color:var(--dim)">${esc(labels)}</td>
+      <td class="num mono">${m.value % 1 === 0 ? m.value : m.value.toFixed(4)}</td>
+      <td class="num mono">${fmtRate(r)}</td></tr>`;
+  });
+  $("metrics").innerHTML = rows.join("") || `<tr><td colspan="4" class="empty">nothing matches</td></tr>`;
+}
+$("mfilter").oninput = () => { if (prev) renderMetrics(prev, 0); };
+
+async function tick() {
+  if (paused) return;
+  let s;
+  try {
+    s = await (await fetch("/api/state")).json();
+  } catch (e) {
+    $("dot").classList.add("paused");
+    $("livetext").textContent = "disconnected";
+    return;
+  }
+  $("dot").classList.remove("paused");
+  $("livetext").textContent = "live";
+  const now = Date.parse(s.now);
+  const dt = prevAt ? (now - prevAt) / 1000 : 0;
+  // Topic rates are computed once and shared: the graph colours edges by
+  // what is flowing now, which is not the same as what has ever flowed.
+  // A topic's rate is what its publisher sends — counting deliveries too
+  // would report a 5hz topic with one subscriber as 10/s.
+  const flows = new Map(s.topics.map((t) =>
+    [t.name, rate("topic:" + t.name, t.pubs.length ? t.sent : t.received, dt)]));
+  renderHeader(s);
+  // Re-rendering the node cards would blow away a parameter field being
+  // typed into, so that section holds still while it has focus.
+  if (!document.activeElement || !document.activeElement.matches(".param input")) renderNodes(s, dt);
+  renderGraph(s, flows);
+  renderTopics(s, dt, flows);
+  renderTraces(s);
+  renderMetrics(s, dt);
+  prev = s; prevAt = now;
+}
+tick();
+setInterval(tick, 1000);
+</script>
+</body>
+</html>

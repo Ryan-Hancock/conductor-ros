@@ -127,6 +127,90 @@ func MetricsText() string {
 	return strings.Join(lines, "\n") + "\n"
 }
 
+// Metric is one collected series, with its labels parsed out. It is what the
+// dashboard reads: the Prometheus text format is for scrapers, not for
+// rendering.
+type Metric struct {
+	Name   string            `json:"name"`
+	Labels map[string]string `json:"labels,omitempty"`
+	Value  float64           `json:"value"`
+	Kind   string            `json:"kind"` // counter, gauge, histogram
+}
+
+// MetricsSnapshot returns every collected series. Histograms are returned as
+// a _count and a _sum_seconds pair, matching the exposition format.
+func MetricsSnapshot() []Metric {
+	metricsMu.RLock()
+	defer metricsMu.RUnlock()
+
+	var out []Metric
+	for key, c := range counters {
+		out = append(out, Metric{key.name, parseLabels(key.labels), float64(c.Load()), "counter"})
+	}
+	for key, g := range gauges {
+		out = append(out, Metric{key.name, parseLabels(key.labels), float64(g.Load()), "gauge"})
+	}
+	for key, h := range histograms {
+		labels := parseLabels(key.labels)
+		out = append(out, Metric{key.name + "_count", labels, float64(h.count.Load()), "histogram"})
+		out = append(out, Metric{key.name + "_sum_seconds", labels, float64(h.sumNS.Load()) / 1e9, "histogram"})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Name != out[j].Name {
+			return out[i].Name < out[j].Name
+		}
+		return labelString2(out[i].Labels) < labelString2(out[j].Labels)
+	})
+	return out
+}
+
+// parseLabels reverses labelString: `node="localizer",topic="pose"`.
+func parseLabels(s string) map[string]string {
+	if s == "" {
+		return nil
+	}
+	out := map[string]string{}
+	for _, part := range splitLabels(s) {
+		k, v, ok := strings.Cut(part, "=")
+		if !ok {
+			continue
+		}
+		out[k] = strings.Trim(v, `"`)
+	}
+	return out
+}
+
+// splitLabels splits on commas outside quotes; label values may contain them.
+func splitLabels(s string) []string {
+	var parts []string
+	inQuote, start := false, 0
+	for i := 0; i < len(s); i++ {
+		switch s[i] {
+		case '"':
+			inQuote = !inQuote
+		case ',':
+			if !inQuote {
+				parts = append(parts, s[start:i])
+				start = i + 1
+			}
+		}
+	}
+	return append(parts, s[start:])
+}
+
+func labelString2(m map[string]string) string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	var b strings.Builder
+	for _, k := range keys {
+		fmt.Fprintf(&b, "%s=%s,", k, m[k])
+	}
+	return b.String()
+}
+
 // serveMetrics starts an HTTP server exposing /metrics. It returns the
 // server so the caller can shut it down.
 func serveMetrics(addr string) *http.Server {

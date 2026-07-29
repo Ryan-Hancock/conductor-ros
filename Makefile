@@ -78,6 +78,10 @@ deploy-dry: ## show what deploying examples/patrol to its robot would run
 .PHONY: verify
 verify: fmt vet test-race check ## everything that runs without a live ROS graph
 
+.PHONY: dashboard
+dashboard: ## run examples/patrol with the live dashboard on :4000
+	go run ./examples/patrol -dashboard 127.0.0.1:4000 -dashboard-traces 500
+
 .PHONY: gen
 gen: ## regenerate launch XML, params.yaml and graph.dot for examples/patrol
 	$(CLI) build examples/patrol

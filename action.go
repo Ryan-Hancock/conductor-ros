@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"reflect"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -43,7 +44,8 @@ func (g *Goal[G, F]) Feedback(f F) { g.sendFeedback(f) }
 //
 // Tags: action (required) — the action name.
 type Action[G, F, R any] struct {
-	name string
+	name  string
+	goals atomic.Uint64
 }
 
 // Name returns the wired action name (empty before Run).
@@ -73,10 +75,13 @@ func (a *Action[G, F, R]) bind(rt *runtimeState, nr *nodeRuntime, field reflect.
 	registerServiceTypes(reflect.TypeFor[getResultRequest](), reflect.TypeFor[getResultResponse[R]](), info.GetResult)
 
 	rt.recordProvides(nr.name, name)
+	rt.recordEndpoint(Endpoint{Node: nr.name, Kind: EndpointAction, Field: field.Name, Name: name,
+		Type: info.Name, count: countOf(a.goals.Load)})
 	srv := &actionServer[G, F, R]{
-		action:  name,
-		handler: h,
-		goals:   map[uuidMsg]*goalRecord[R]{},
+		action:   name,
+		handler:  h,
+		goals:    map[uuidMsg]*goalRecord[R]{},
+		accepted: &a.goals,
 	}
 	base := name + "/_action/"
 	transientQoS, _ := QoSProfile("transient")
@@ -137,6 +142,9 @@ type actionServer[G, F, R any] struct {
 
 	mu    sync.Mutex
 	goals map[uuidMsg]*goalRecord[R]
+
+	// accepted counts goals for the dashboard's live inventory.
+	accepted *atomic.Uint64
 }
 
 func (s *actionServer[G, F, R]) handleSendGoal(reqAny any) (any, error) {
@@ -147,6 +155,7 @@ func (s *actionServer[G, F, R]) handleSendGoal(reqAny any) (any, error) {
 		s.mu.Unlock()
 		return sendGoalResponse{Accepted: false}, nil
 	}
+	s.accepted.Add(1)
 	ctx, cancel := context.WithCancel(context.Background())
 	rec := &goalRecord[R]{
 		info:   goalInfoMsg{GoalId: req.GoalId, Stamp: time.Now()},

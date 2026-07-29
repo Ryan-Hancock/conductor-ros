@@ -24,6 +24,7 @@ type runtimeState struct {
 	nodes       []*nodeRuntime
 	timers      []*timerHandle
 	deps        map[string]*nodeDeps
+	endpoints   []Endpoint
 	paramValues map[string]map[string]string // node name -> parameter -> raw value
 }
 
@@ -54,6 +55,8 @@ func Run(nodes ...any) {
 	lifecycleMode := fs.String("lifecycle", "auto", "lifecycle mode (auto, manual)")
 	metricsAddr := fs.String("metrics-addr", "", "expose Prometheus metrics on this address (e.g. :9090)")
 	traceLog := fs.Bool("trace", false, "log a span for every callback, with W3C trace context")
+	dashAddr := fs.String("dashboard", "", "serve the live dashboard on this address (e.g. :4000)")
+	dashTraces := fs.Int("dashboard-traces", 0, "record this many recent spans for the dashboard's trace view (implies tracing)")
 	var paramFiles stringList
 	fs.Var(&paramFiles, "params", "parameter file to load (repeatable; later files win)")
 	env := fs.String("env", "", "environment name: also loads params.<env>.yaml next to the last -params file, or ./params.<env>.yaml")
@@ -98,6 +101,9 @@ func Run(nodes ...any) {
 	}
 	if *metricsAddr != "" {
 		a.metrics = serveMetrics(*metricsAddr)
+	}
+	if *dashAddr != "" {
+		a.dashboard = serveDashboard(*dashAddr, a, *transportName, *dashTraces)
 	}
 	a.startStats(2 * time.Second)
 	names := make([]string, len(a.rt.nodes))
@@ -165,6 +171,7 @@ type app struct {
 	statsQuit chan struct{}
 	statsDone chan struct{}
 	metrics   *http.Server
+	dashboard *http.Server
 }
 
 // stringList collects a repeatable string flag.
@@ -376,10 +383,13 @@ func (a *app) stop() {
 	}
 	// Run lifecycle shutdown hooks while the executors are still draining.
 	a.shutDown()
-	if a.metrics != nil {
+	for _, srv := range []*http.Server{a.metrics, a.dashboard} {
+		if srv == nil {
+			continue
+		}
 		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-		defer cancel()
-		a.metrics.Shutdown(ctx)
+		srv.Shutdown(ctx)
+		cancel()
 	}
 	for _, th := range a.rt.timers {
 		if th.stop == nil {

@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"sync/atomic"
 	"time"
 )
 
@@ -21,6 +22,7 @@ type Client[Req, Res any] struct {
 	service string
 	timeout time.Duration
 	call    func(any, time.Duration) (any, error)
+	calls   atomic.Uint64
 }
 
 // Service returns the wired service name (empty before Run).
@@ -32,6 +34,7 @@ func (c *Client[Req, Res]) Call(req Req) (Res, error) {
 	if c.call == nil {
 		panic("conductor: Call on a client that was not wired by Run")
 	}
+	c.calls.Add(1)
 	res, err := c.call(req, c.timeout)
 	if err != nil {
 		return zero, err
@@ -60,6 +63,8 @@ func (c *Client[Req, Res]) bind(rt *runtimeState, nr *nodeRuntime, field reflect
 		Timeout: timeout,
 	}
 	rt.recordConsumes(nr.name, service)
+	rt.recordEndpoint(Endpoint{Node: nr.name, Kind: EndpointClient, Field: field.Name, Name: service,
+		Type: rosServiceName(reflect.TypeFor[Req](), reflect.TypeFor[Res]()), count: countOf(c.calls.Load)})
 	call, err := rt.transport.ServiceClient(spec)
 	if err != nil {
 		return err

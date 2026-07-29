@@ -184,3 +184,44 @@ func TestBadDefaultEnvironment(t *testing.T) {
 		t.Fatal("expected an error for a default that is not declared")
 	}
 }
+
+// Sensor calibration differs from robot to robot, so an environment may name
+// its own transform tree — and must not silently fall back to another one.
+func TestResolveFramesPerEnvironment(t *testing.T) {
+	dir := writeApp(t, map[string]string{
+		"conductor.json": baseConfig,
+		"environments.json": `{
+  "default": "sim",
+  "environments": {
+    "sim":   {"transport": "inproc"},
+    "robot": {"transport": "zenoh", "frames": "frames.robot.json"},
+    "spare": {"transport": "zenoh", "frames": "frames.spare.json"}
+  }
+}`,
+		"frames.json":       `{"static":[{"parent":"base_link","child":"laser","xyz":[0.1,0,0.2]}]}`,
+		"frames.robot.json": `{"static":[{"parent":"base_link","child":"laser","xyz":[0.118,0,0.191]}]}`,
+	})
+	app, err := ScanApp(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if app.FramesFile != "frames.json" || app.Frames.Transforms[0].XYZ[0] != 0.1 {
+		t.Fatalf("base frames = %+v (%s)", app.Frames, app.FramesFile)
+	}
+
+	robot, err := app.Resolve("robot")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if robot.FramesFile != "frames.robot.json" || robot.Frames.Transforms[0].XYZ[0] != 0.118 {
+		t.Fatalf("robot frames = %+v (%s)", robot.Frames, robot.FramesFile)
+	}
+	// Resolving one environment must not disturb the next.
+	if app.Frames.Transforms[0].XYZ[0] != 0.1 {
+		t.Fatal("resolving the robot environment mutated the base tree")
+	}
+
+	if _, err := app.Resolve("spare"); err == nil || !strings.Contains(err.Error(), "frames.spare.json") {
+		t.Fatalf("Resolve(spare) = %v, want it to refuse the missing frames file", err)
+	}
+}

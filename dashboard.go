@@ -34,12 +34,48 @@ var dashboardFS embed.FS
 // counters are absolute, and rates are derived by the page from successive
 // snapshots, so no rate window is baked into the runtime.
 type DashboardState struct {
-	App     AppView     `json:"app"`
-	Nodes   []NodeView  `json:"nodes"`
-	Topics  []TopicView `json:"topics"`
-	Metrics []Metric    `json:"metrics"`
-	Traces  []TraceView `json:"traces"`
-	Now     time.Time   `json:"now"`
+	App      AppView       `json:"app"`
+	Nodes    []NodeView    `json:"nodes"`
+	Topics   []TopicView   `json:"topics"`
+	Missions []MissionView `json:"missions"`
+	Frames   []FrameView   `json:"frames"`
+	Metrics  []Metric      `json:"metrics"`
+	Traces   []TraceView   `json:"traces"`
+	Now      time.Time     `json:"now"`
+}
+
+// MissionView is a node's task machine: the declared steps, and which one is
+// running. The dashboard draws the same machine `conductor check` prints and
+// mission.dot renders, with the live position marked on it.
+type MissionView struct {
+	Node    string            `json:"node"`
+	Name    string            `json:"name"`
+	Status  string            `json:"status"`
+	Step    string            `json:"step"`
+	Attempt int               `json:"attempt"`
+	Elapsed float64           `json:"elapsed_seconds"`
+	Err     string            `json:"err,omitempty"`
+	Steps   []MissionStepView `json:"steps"`
+}
+
+type MissionStepView struct {
+	Name    string `json:"name"`
+	Next    string `json:"next"`
+	Fail    string `json:"fail,omitempty"`
+	Timeout string `json:"timeout,omitempty"`
+	Retry   int    `json:"retry,omitempty"`
+	Entries uint64 `json:"entries"`
+	Current bool   `json:"current"`
+}
+
+// FrameView is one link of the declared transform tree.
+type FrameView struct {
+	Parent  string     `json:"parent"`
+	Child   string     `json:"child"`
+	XYZ     [3]float64 `json:"xyz"`
+	RPY     [3]float64 `json:"rpy"`
+	Dynamic bool       `json:"dynamic"`
+	By      string     `json:"by,omitempty"`
 }
 
 type AppView struct {
@@ -293,12 +329,75 @@ func (d *dashboard) state() DashboardState {
 			Bringup:   order,
 			Tracing:   d.ring != nil,
 		},
-		Nodes:   nodes,
-		Topics:  topicViews(endpoints),
-		Metrics: MetricsSnapshot(),
-		Traces:  d.tracesOrNil(),
-		Now:     time.Now(),
+		Nodes:    nodes,
+		Topics:   topicViews(endpoints),
+		Missions: missionViews(rt),
+		Frames:   frameViews(rt.frames),
+		Metrics:  MetricsSnapshot(),
+		Traces:   d.tracesOrNil(),
+		Now:      time.Now(),
 	}
+}
+
+// missionViews describes every task machine in this process, live.
+func missionViews(rt *runtimeState) []MissionView {
+	out := []MissionView{}
+	for _, nr := range rt.nodes {
+		r := nr.mission
+		if r == nil {
+			continue
+		}
+		s := r.snapshot()
+		v := MissionView{
+			Node:    nr.name,
+			Name:    r.name,
+			Status:  string(s.Status),
+			Step:    s.Step,
+			Attempt: s.Attempt,
+			Steps:   make([]MissionStepView, 0, len(r.order)),
+		}
+		if !s.Since.IsZero() {
+			v.Elapsed = time.Since(s.Since).Seconds()
+		}
+		if s.Err != nil {
+			v.Err = s.Err.Error()
+		}
+		for _, def := range r.order {
+			v.Steps = append(v.Steps, MissionStepView{
+				Name:    def.name,
+				Next:    def.next,
+				Fail:    def.fail,
+				Timeout: durationOrEmpty(def.timeout),
+				Retry:   def.retry,
+				Entries: def.entries.Load(),
+				Current: s.Status == MissionRunning && def.name == s.Step,
+			})
+		}
+		out = append(out, v)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Node < out[j].Node })
+	return out
+}
+
+func frameViews(t *FrameTree) []FrameView {
+	out := []FrameView{}
+	if t == nil {
+		return out
+	}
+	for _, tf := range t.Transforms {
+		out = append(out, FrameView{
+			Parent: tf.Parent, Child: tf.Child, XYZ: tf.XYZ, RPY: tf.RPY,
+			Dynamic: tf.Dynamic, By: tf.By,
+		})
+	}
+	return out
+}
+
+func durationOrEmpty(d time.Duration) string {
+	if d == 0 {
+		return ""
+	}
+	return d.String()
 }
 
 func (d *dashboard) tracesOrNil() []TraceView {

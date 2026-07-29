@@ -11,6 +11,19 @@ import (
 	"conductor.dev/conductor/srvs"
 )
 
+// runPatrol wires nodes with the application's real transform tree, the way
+// the runtime loads it from frames.json at startup. The safety monitor reads
+// the lidar's mounting out of it while configuring, so a test without it
+// would not be running the same application.
+func runPatrol(t *testing.T, nodes ...any) *conductortest.App {
+	t.Helper()
+	tree, err := conductor.LoadFrames("frames.json")
+	if err != nil || tree == nil {
+		t.Fatalf("loading frames.json: %v", err)
+	}
+	return conductortest.RunWith(t, conductortest.Options{Frames: tree}, nodes...)
+}
+
 func poseAt(x, y float64) msgs.PoseStamped {
 	return msgs.PoseStamped{
 		Header: msgs.Header{Stamp: time.Now(), FrameID: "map"},
@@ -22,7 +35,7 @@ func speed(c msgs.Twist) float64 { return math.Hypot(c.Linear.X, c.Linear.Y) }
 
 // The navigator steers toward its goal and never exceeds max_speed.
 func TestNavigatorSteersTowardGoal(t *testing.T) {
-	app := conductortest.Run(t, &Navigator{goal: msgs.Point{X: 5, Y: 4}})
+	app := runPatrol(t, &Navigator{goal: msgs.Point{X: 5, Y: 4}})
 	cmd := conductortest.Watch[msgs.Twist](app, "cmd_vel")
 
 	conductortest.Publish(app, "amcl_pose", poseAt(0, 0))
@@ -41,7 +54,7 @@ func TestNavigatorSteersTowardGoal(t *testing.T) {
 
 // Arriving at the goal stops the robot rather than overshooting it.
 func TestNavigatorStopsAtGoal(t *testing.T) {
-	app := conductortest.Run(t, &Navigator{goal: msgs.Point{X: 5, Y: 4}})
+	app := runPatrol(t, &Navigator{goal: msgs.Point{X: 5, Y: 4}})
 	cmd := conductortest.Watch[msgs.Twist](app, "cmd_vel")
 
 	conductortest.Publish(app, "amcl_pose", poseAt(5, 4))
@@ -54,8 +67,13 @@ func TestNavigatorStopsAtGoal(t *testing.T) {
 // max_speed is the same knob whether it arrives from a parameter file at
 // startup or from `ros2 param set` at runtime.
 func TestMaxSpeedParameter(t *testing.T) {
+	tree, err := conductor.LoadFrames("frames.json")
+	if err != nil {
+		t.Fatal(err)
+	}
 	app := conductortest.RunWith(t, conductortest.Options{
 		Params: map[string]map[string]string{"navigator": {"max_speed": "0.25"}},
+		Frames: tree,
 	}, &Navigator{goal: msgs.Point{X: 50, Y: 40}})
 	cmd := conductortest.Watch[msgs.Twist](app, "cmd_vel")
 
@@ -73,7 +91,7 @@ func TestMaxSpeedParameter(t *testing.T) {
 
 // The e-stop service changes what the monitor reports on its next watchdog.
 func TestEstopServiceChangesStatus(t *testing.T) {
-	app := conductortest.Run(t, &SafetyMonitor{})
+	app := runPatrol(t, &SafetyMonitor{})
 	status := conductortest.Watch[PatrolStatus](app, "patrol_status")
 
 	app.Tick("safety_monitor")
@@ -98,7 +116,7 @@ func TestEstopServiceChangesStatus(t *testing.T) {
 
 // The e-stop topic and the e-stop service must agree.
 func TestEstopTopic(t *testing.T) {
-	app := conductortest.Run(t, &SafetyMonitor{})
+	app := runPatrol(t, &SafetyMonitor{})
 	status := conductortest.Watch[PatrolStatus](app, "patrol_status")
 
 	conductortest.Publish(app, "estop", msgs.Bool{Data: true})
@@ -112,7 +130,7 @@ func TestEstopTopic(t *testing.T) {
 // The whole app wired together: the localizer's pose drives the navigator,
 // whose command reaches the safety monitor — one tick, three nodes.
 func TestFullGraph(t *testing.T) {
-	app := conductortest.Run(t,
+	app := runPatrol(t,
 		&Localizer{},
 		&Navigator{goal: msgs.Point{X: 5, Y: 4}},
 		&SafetyMonitor{},
@@ -137,7 +155,7 @@ func TestFullGraph(t *testing.T) {
 
 // A deactivated node is silent, which is the whole point of the lifecycle.
 func TestDeactivatedNavigatorIsSilent(t *testing.T) {
-	app := conductortest.Run(t, &Navigator{goal: msgs.Point{X: 5, Y: 4}})
+	app := runPatrol(t, &Navigator{goal: msgs.Point{X: 5, Y: 4}})
 	cmd := conductortest.Watch[msgs.Twist](app, "cmd_vel")
 
 	app.Transition("navigator", conductor.TransitionDeactivate)
@@ -150,5 +168,92 @@ func TestDeactivatedNavigatorIsSilent(t *testing.T) {
 	conductortest.Publish(app, "amcl_pose", poseAt(0, 0))
 	if cmd.Len() != 1 {
 		t.Fatalf("reactivated navigator published %d commands, want 1", cmd.Len())
+	}
+}
+
+// The frame tag is the single place the frame is written: the publisher
+// stamps it, and the transform tree is what the monitor measures the robot
+// with.
+func TestFramesAreDeclaredOnce(t *testing.T) {
+	app := runPatrol(t, &Localizer{}, &SafetyMonitor{})
+	pose := conductortest.Watch[msgs.PoseStamped](app, "amcl_pose")
+	status := conductortest.Watch[PatrolStatus](app, "patrol_status")
+
+	app.Tick("localizer")
+	got, ok := pose.Last()
+	if !ok {
+		t.Fatal("no pose published")
+	}
+	if got.Header.FrameID != "map" {
+		t.Fatalf("pose stamped %q, want the declared frame \"map\"", got.Header.FrameID)
+	}
+	if got.Header.Stamp.IsZero() {
+		t.Fatal("pose has no timestamp; the frame tag should stamp one")
+	}
+
+	app.Tick("safety_monitor")
+	if s, _ := status.Last(); s.Header.FrameId != "base_link" {
+		t.Fatalf("status stamped %q, want \"base_link\"", s.Header.FrameId)
+	}
+}
+
+// The lidar's pose comes from frames.json, composed by the runtime — the same
+// lookup conductor check resolves at build time.
+func TestLidarOffsetComesFromTheTransformTree(t *testing.T) {
+	monitor := &SafetyMonitor{}
+	runPatrol(t, monitor)
+	if math.Abs(monitor.laserAhead-0.12) > 1e-9 {
+		t.Fatalf("lidar %v m ahead of base_link, want 0.12 from frames.json", monitor.laserAhead)
+	}
+}
+
+// The route is a mission: activating the patroller drives it to the first
+// waypoint, dwelling moves it to the next, and an e-stop parks it in holding
+// until the stop clears.
+func TestPatrolRouteIsAMission(t *testing.T) {
+	tree, err := conductor.LoadFrames("frames.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	app := conductortest.RunWith(t, conductortest.Options{
+		ManualLifecycle: true,
+		Frames:          tree,
+		// A short dwell keeps the test quick; the route's timing is a
+		// parameter like any other.
+		Params: map[string]map[string]string{"patroller": {"dwell": "10ms"}},
+	}, &Patroller{})
+	goals := conductortest.Watch[msgs.PoseStamped](app, "goal_pose")
+
+	app.Transition("patroller", conductor.TransitionConfigure)
+	app.Transition("patroller", conductor.TransitionActivate)
+
+	deadline := time.Now().Add(2 * time.Second)
+	for goals.Len() < 3 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if goals.Len() < 3 {
+		t.Fatalf("the route published %d waypoints in 2s", goals.Len())
+	}
+	if got, _ := goals.Last(); got.Header.FrameID != "map" {
+		t.Fatalf("waypoint stamped %q, want the declared map frame", got.Header.FrameID)
+	}
+
+	// An e-stop sends the next transition into holding rather than onward.
+	conductortest.Publish(app, "estop", msgs.Bool{Data: true})
+	deadline = time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, step := app.Mission("patroller"); step == "holding" {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if _, step := app.Mission("patroller"); step != "holding" {
+		t.Fatalf("mission at %q after an e-stop, want holding", step)
+	}
+
+	// Deactivating stops the mission, which is what a lifecycle is for.
+	app.Transition("patroller", conductor.TransitionDeactivate)
+	if status, _ := app.Mission("patroller"); status != conductor.MissionCanceled {
+		t.Fatalf("mission %s after deactivate, want canceled", status)
 	}
 }

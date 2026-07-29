@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 
+	"conductor.dev/conductor"
 	"conductor.dev/conductor/internal/graph"
 )
 
@@ -107,6 +108,89 @@ func Dot(g *graph.Graph) string {
 	return b.String()
 }
 
+// MissionDot renders the declared task machines as state diagrams: one
+// cluster per mission, solid edges for next, dashed for fail, dotted for the
+// branches taken by Task.Goto. This is the picture a behaviour tree's XML is
+// usually drawn by hand to produce.
+func MissionDot(g *graph.Graph) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "// %s\ndigraph %q {\n  rankdir=LR;\n  node [fontname=\"Helvetica\", shape=box, style=rounded];\n",
+		header, g.App.Name+" missions")
+	for i, m := range g.Machines {
+		fmt.Fprintf(&b, "  subgraph cluster_%d {\n    label=\"%s: %s\";\n    fontname=\"Helvetica\";\n", i, m.Node, m.Name)
+		fmt.Fprintf(&b, "    \"%s.start\" [label=\"\", shape=circle, width=0.2, style=filled, fillcolor=black];\n", m.Name)
+		for _, s := range m.Steps {
+			label := s.Name
+			if s.Timeout != "" {
+				label += `\ntimeout ` + s.Timeout
+			}
+			if s.Retry != "" {
+				label += `\nretry ` + s.Retry
+			}
+			fmt.Fprintf(&b, "    \"%s.%s\" [label=\"%s\"];\n", m.Name, s.Name, label)
+		}
+		for _, terminal := range []string{conductor.StepDone, conductor.StepFailed} {
+			if machineUses(m, terminal) {
+				fmt.Fprintf(&b, "    \"%s.%s\" [label=%q, shape=doublecircle, fontsize=10];\n", m.Name, terminal, terminal)
+			}
+		}
+		fmt.Fprintf(&b, "    \"%s.start\" -> \"%s.%s\";\n", m.Name, m.Name, m.Start)
+		for _, s := range m.Steps {
+			if s.Next != "" {
+				fmt.Fprintf(&b, "    \"%s.%s\" -> \"%s.%s\";\n", m.Name, s.Name, m.Name, s.Next)
+			}
+			if s.Fail != "" {
+				fmt.Fprintf(&b, "    \"%s.%s\" -> \"%s.%s\" [style=dashed, label=\"fail\", fontsize=9];\n",
+					m.Name, s.Name, m.Name, s.Fail)
+			}
+			for _, gt := range s.Gotos {
+				fmt.Fprintf(&b, "    \"%s.%s\" -> \"%s.%s\" [style=dotted, label=\"goto\", fontsize=9];\n",
+					m.Name, s.Name, m.Name, gt)
+			}
+		}
+		b.WriteString("  }\n")
+	}
+	b.WriteString("}\n")
+	return b.String()
+}
+
+func machineUses(m graph.Machine, step string) bool {
+	for _, s := range m.Steps {
+		for _, t := range s.Targets() {
+			if t == step {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// FramesDot renders the declared transform tree: static links solid (this
+// application publishes them), dynamic links dashed and labelled with whoever
+// does.
+func FramesDot(g *graph.Graph) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "// %s\ndigraph %q {\n  rankdir=LR;\n  node [fontname=\"Helvetica\", shape=box];\n",
+		header, g.App.Name+" frames")
+	for _, tf := range g.Frames.Transforms {
+		if tf.Dynamic {
+			fmt.Fprintf(&b, "  %q -> %q [style=dashed, label=%q, fontsize=9];\n", tf.Parent, tf.Child, byOrExternal(tf.By))
+			continue
+		}
+		label := fmt.Sprintf("%.3g %.3g %.3g", tf.XYZ[0], tf.XYZ[1], tf.XYZ[2])
+		fmt.Fprintf(&b, "  %q -> %q [label=%q, fontsize=9];\n", tf.Parent, tf.Child, label)
+	}
+	b.WriteString("}\n")
+	return b.String()
+}
+
+func byOrExternal(by string) string {
+	if by == "" {
+		return "external"
+	}
+	return by
+}
+
 // WriteAll writes every artifact under <app dir>/gen and returns the paths.
 func WriteAll(g *graph.Graph, binPath string) ([]string, error) {
 	outDir := filepath.Join(g.App.Dir, "gen")
@@ -117,6 +201,12 @@ func WriteAll(g *graph.Graph, binPath string) ([]string, error) {
 		g.App.Name + ".launch.xml": LaunchXML(g, binPath),
 		"params.yaml":              ParamsYAML(g),
 		"graph.dot":                Dot(g),
+	}
+	if len(g.Machines) > 0 {
+		artifacts["mission.dot"] = MissionDot(g)
+	}
+	if g.Frames != nil {
+		artifacts["frames.dot"] = FramesDot(g)
 	}
 	var written []string
 	for name, content := range artifacts {

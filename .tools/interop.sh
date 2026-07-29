@@ -7,7 +7,8 @@
 #
 #   ./.tools/interop.sh            run every leg
 #   ./.tools/interop.sh services   one group
-#                                  (services | actions | lifecycle | params | turtlesim)
+#                                  (services | actions | lifecycle | params |
+#                                   frames | turtlesim)
 #
 # Requires a ROS 2 install plus the user-space rmw_zenoh overlay in .tools
 # (see env.sh). Starts and stops its own zenoh router.
@@ -87,7 +88,7 @@ ros2run() { # ros2run <seconds> <args...>
 
 if [[ "$GROUP" == all || "$GROUP" == lifecycle ]]; then
   echo "lifecycle:"
-  bg "$WORK/lifecycle.log" "$BIN/patrol" -transport zenoh -trace
+  bg "$WORK/lifecycle.log" "$BIN/patrol" -transport zenoh -trace -frames examples/patrol/frames.json
   lifecycle_pid="$LAST_PID"
   sleep 3
 
@@ -142,7 +143,7 @@ navigator:
   ros__parameters:
     max_speed: 0.75
 YAML
-  bg "$WORK/params_node.log" "$BIN/patrol" -transport zenoh -params "$WORK/params.yaml" -env sim
+  bg "$WORK/params_node.log" "$BIN/patrol" -transport zenoh -params "$WORK/params.yaml" -env sim -frames examples/patrol/frames.json
   params_pid="$LAST_PID"
   sleep 3
 
@@ -185,7 +186,7 @@ fi
 
 if [[ "$GROUP" == all || "$GROUP" == services ]]; then
   echo "services:"
-  bg "$WORK/patrol.log" "$BIN/patrol" -transport zenoh
+  bg "$WORK/patrol.log" "$BIN/patrol" -transport zenoh -frames examples/patrol/frames.json
   sleep 3
 
   ros2run 20 service call /engage_estop std_srvs/srv/SetBool "{data: true}" \
@@ -194,6 +195,36 @@ if [[ "$GROUP" == all || "$GROUP" == services ]]; then
 
   ros2run 20 topic echo --once /cmd_vel >"$WORK/topic.log" 2>&1
   check "conductor publisher -> ros2 topic echo" "$WORK/topic.log" "linear:"
+fi
+
+if [[ "$GROUP" == all || "$GROUP" == frames ]]; then
+  echo "frames:"
+  bg "$WORK/frames_node.log" "$BIN/patrol" -transport zenoh -frames examples/patrol/frames.json
+  frames_pid="$LAST_PID"
+  sleep 3
+
+  # The declared tree has to be readable as tf2, not merely published: the
+  # whole point is that rviz, tf2_ros and everything else consume it.
+  ros2run 20 topic echo --once /tf_static >"$WORK/tf_static.log" 2>&1
+  check "declared transforms reach /tf_static" "$WORK/tf_static.log" "child_frame_id: laser"
+
+  ros2run 20 topic info /tf_static >"$WORK/tf_type.log" 2>&1
+  check "tf_static carries tf2_msgs/msg/TFMessage" "$WORK/tf_type.log" "Type: tf2_msgs/msg/TFMessage"
+
+  # tf2 itself composing our transform: translation and yaw as declared.
+  bg "$WORK/tf_echo.log" ros2 run tf2_ros tf2_echo base_link laser
+  tf_echo_pid="$LAST_PID"
+  sleep 6
+  kill -9 "$tf_echo_pid" 2>/dev/null
+  check "tf2_echo resolves base_link -> laser" "$WORK/tf_echo.log" "Translation: [0.120, 0.000, 0.190]"
+  check "the declared yaw survives the round trip" "$WORK/tf_echo.log" "in RPY (degree) [0.000, -0.000, 180.000]"
+
+  # A frame tag is what stamps the header on the wire.
+  ros2run 20 topic echo --once /amcl_pose >"$WORK/tf_frame.log" 2>&1
+  check "frame tag stamps the published header" "$WORK/tf_frame.log" "frame_id: map"
+
+  kill -9 "$frames_pid" 2>/dev/null
+  sleep 1
 fi
 
 if [[ "$GROUP" == all || "$GROUP" == actions ]]; then

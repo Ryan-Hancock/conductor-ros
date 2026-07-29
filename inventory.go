@@ -21,6 +21,8 @@ const (
 	EndpointClient       EndpointKind = "client"
 	EndpointAction       EndpointKind = "action"
 	EndpointActionClient EndpointKind = "action client"
+	EndpointMission      EndpointKind = "mission"
+	EndpointTF           EndpointKind = "transforms"
 )
 
 // Endpoint describes one wired declaration.
@@ -31,7 +33,8 @@ type Endpoint struct {
 	Name   string       `json:"name"`           // topic, service or action name
 	Type   string       `json:"type,omitempty"` // ROS interface name when known
 	QoS    string       `json:"qos,omitempty"`
-	Rate   string       `json:"rate,omitempty"` // timers
+	Rate   string       `json:"rate,omitempty"`  // timers
+	Frame  string       `json:"frame,omitempty"` // frame tag, when declared
 	count  *countFunc   // live message/call count, nil if not counted
 	Counts uint64       `json:"counts"`
 }

@@ -117,6 +117,27 @@ func (a *App) State(node string) conductor.State {
 	return s
 }
 
+// AwaitMission waits for a node's mission to reach a status — done, failed,
+// canceled — and fails the test if it does not get there in time. It is the
+// mission equivalent of Await on a watched topic: steps run off the executor,
+// so Settle does not cover them.
+func (a *App) AwaitMission(node string, want conductor.MissionStatus, timeout time.Duration) {
+	a.tb.Helper()
+	if err := a.TestApp.AwaitMission(node, want, timeout); err != nil {
+		a.tb.Fatalf("conductortest: %v", err)
+	}
+}
+
+// Mission returns a node's mission status and the step it is on.
+func (a *App) Mission(node string) (conductor.MissionStatus, string) {
+	a.tb.Helper()
+	status, step, err := a.TestApp.Mission(node)
+	if err != nil {
+		a.tb.Fatalf("conductortest: %v", err)
+	}
+	return status, step
+}
+
 // Probe wires extra conductor endpoints into the app under a node name of
 // its own — the way to drive an action server, or anything else the helpers
 // below do not cover. See conductor.TestApp.BindProbe.

@@ -19,11 +19,19 @@ type nodeRuntime struct {
 	lifecycle *lifecycle
 	params    []*paramHandle
 
+	// mission and steps are the node's declared task machine, assembled
+	// after binding (the Mission field and its Steps may be declared in any
+	// order). onActive/onInactive are what the lifecycle starts and stops.
+	mission    *missionRunner
+	steps      []*stepDef
+	onActive   []func()
+	onInactive []func()
+
 	// currentTrace is the trace context of the callback the executor is
 	// running, so messages published from inside a callback become children
-	// of it. Only ever touched from the executor goroutine, which is
-	// single-threaded by construction.
-	currentTrace TraceContext
+	// of it. Written only by the executor, but read by publishers on other
+	// goroutines (an action handler, a mission step), so it is atomic.
+	currentTrace atomic.Pointer[TraceContext]
 }
 
 // runInstrumented executes a callback on the executor with a span and
@@ -34,10 +42,10 @@ func (nr *nodeRuntime) runInstrumented(kind SpanKind, name string, parent TraceC
 	var span *Span
 	if tracingEnabled() {
 		span = startSpan(nr.name, kind, name, parent)
-		nr.currentTrace = span.Context
+		nr.currentTrace.Store(&span.Context)
 	}
 	fn()
-	nr.currentTrace = TraceContext{}
+	nr.currentTrace.Store(nil)
 	span.finish(nil)
 	observe("conductor_callback_duration", time.Since(start),
 		"node", nr.name, "kind", string(kind), "name", name)

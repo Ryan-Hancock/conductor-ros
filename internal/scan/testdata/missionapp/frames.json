@@ -1,0 +1,9 @@
+{
+  "static": [
+    {"parent": "base_link", "child": "laser", "xyz": [0.1, 0, 0.2], "rpy": [0, 0, 0]}
+  ],
+  "dynamic": [
+    {"parent": "map", "child": "odom", "by": "amcl"},
+    {"parent": "odom", "child": "base_link", "by": "ekf"}
+  ]
+}

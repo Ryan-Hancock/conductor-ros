@@ -36,17 +36,28 @@ func (s *Sub[T]) bind(rt *runtimeState, nr *nodeRuntime, field reflect.StructFie
 		var zero T
 		return fmt.Errorf("On%s must have signature func(%T)", field.Name, zero)
 	}
+	frame, header, err := frameTag(rt, field, reflect.TypeFor[T]())
+	if err != nil {
+		return err
+	}
+	var frames *frameChecker
+	if frame != "" {
+		frames = newFrameChecker(nr.name, topic, frame, header)
+	}
 	s.topic = topic
 	spec := TopicSpec{Topic: topic, QoS: q, Type: reflect.TypeFor[T](), Node: nr.name}
 	rt.recordConsumes(nr.name, topic)
 	received := counter("conductor_messages_received_total", "node", nr.name, "topic", topic)
 	rt.recordEndpoint(Endpoint{Node: nr.name, Kind: EndpointSub, Field: field.Name, Name: topic,
-		Type: rosTypeName(reflect.TypeFor[T]()), QoS: q.Name, count: countOf(received.Load)})
+		Type: rosTypeName(reflect.TypeFor[T]()), QoS: q.Name, Frame: frame, count: countOf(received.Load)})
 	return rt.transport.Subscribe(spec, func(msg any, md Metadata) {
 		// Inactive nodes do not process messages, per the managed-node
 		// design; check on delivery so the mailbox is not filled either.
 		if !nr.active() {
 			return
+		}
+		if frames != nil {
+			frames.check(msg)
 		}
 		counter("conductor_messages_received_total", "node", nr.name, "topic", topic).Add(1)
 		nr.enqueue(func() {

@@ -126,6 +126,17 @@ func (l *lifecycle) transition(t Transition) (bool, error) {
 	}
 	l.state = goal
 	l.mu.Unlock()
+	// Work the node owns but does not run on its executor — a mission —
+	// follows the Active state, so deactivating a node really does stop it.
+	if goal == StateActive {
+		for _, fn := range l.node.onActive {
+			fn()
+		}
+	} else if start == StateActive {
+		for _, fn := range l.node.onInactive {
+			fn()
+		}
+	}
 	gauge("conductor_node_lifecycle_state", "node", l.node.name).Store(int64(goal))
 	counter("conductor_lifecycle_transitions_total", "node", l.node.name, "transition", t.String()).Add(1)
 	l.publishEvent(t, start, goal)

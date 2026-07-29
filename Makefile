@@ -25,7 +25,7 @@ help: ## show this help
 	@echo "Conductor targets:"
 	@grep -hE '^[a-z][a-zA-Z0-9_-]*:.*?## ' $(MAKEFILE_LIST) \
 	  | awk -F':.*?## ' '{printf "  \033[36m%-16s\033[0m %s\n", $$1, $$2}'
-	@echo "  interop-<group>  (ROS) one group: lifecycle params services actions turtlesim"
+	@echo "  interop-<group>  (ROS) one group: lifecycle params services actions frames turtlesim"
 	@echo
 	@echo "Targets marked (ROS) need $(ENV) — see README."
 
@@ -72,19 +72,31 @@ bundle: ## build a release bundle for examples/patrol (no target touched)
 	$(CLI) deploy examples/patrol -env bench -bundle
 
 .PHONY: deploy-dry
-deploy-dry: ## show what deploying examples/patrol to its robot would run
-	$(CLI) deploy examples/patrol -env robot -dry-run -goarch $$(go env GOARCH) -cc gcc
+deploy-dry: ## (ROS) show what deploying examples/patrol to its robot would run
+	@$(WITHROS) $(CLI) deploy examples/patrol -env robot -dry-run -goarch $$(go env GOARCH) -cc gcc
 
 .PHONY: verify
 verify: fmt vet test-race check ## everything that runs without a live ROS graph
 
 .PHONY: dashboard
 dashboard: ## run examples/patrol with the live dashboard on :4000
-	go run ./examples/patrol -dashboard 127.0.0.1:4000 -dashboard-traces 500
+	cd examples/patrol && go run . -dashboard 127.0.0.1:4000 -dashboard-traces 500
 
 .PHONY: gen
-gen: ## regenerate launch XML, params.yaml and graph.dot for examples/patrol
+gen: ## regenerate launch XML, params, graph/mission/frames dot for examples/patrol
 	$(CLI) build examples/patrol
+
+.PHONY: mission
+mission: ## (ROS) run the declarative mission example against the Go action server
+	@$(WITHROS) set -m; \
+	  pkill -9 -x rmw_zenohd 2>/dev/null; sleep 1; \
+	  $$CONDUCTOR_OVERLAY/lib/rmw_zenoh_cpp/rmw_zenohd >/dev/null 2>&1 & router=$$!; \
+	  sleep 2; \
+	  go run -tags zenoh ./examples/fibonacci -transport zenoh >/dev/null 2>&1 & server=$$!; \
+	  sleep 2; \
+	  go run -tags zenoh ./examples/mission -transport zenoh; rc=$$?; \
+	  kill -9 $$server $$router 2>/dev/null; \
+	  exit $$rc
 
 .PHONY: clean
 clean: ## remove build output

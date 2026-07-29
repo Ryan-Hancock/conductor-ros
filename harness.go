@@ -50,6 +50,9 @@ type TestOptions struct {
 	ManualLifecycle bool
 	// Only wires just the named node, like Run's -node flag.
 	Only string
+	// Frames is the transform tree the app runs with, as frames.json would
+	// supply at runtime. Use conductor.LoadFrames to read the real one.
+	Frames *FrameTree
 }
 
 // NewTestApp wires nodes and (unless ManualLifecycle) brings them up.
@@ -60,6 +63,7 @@ func NewTestApp(opts TestOptions, nodes ...any) (*TestApp, error) {
 		only:         opts.Only,
 		params:       opts.Params,
 		manualTimers: !opts.RealTimers,
+		frames:       opts.Frames,
 	}, nodes...)
 	if err != nil {
 		return nil, err
@@ -257,6 +261,55 @@ func (ta *TestApp) Transition(node string, t Transition) error {
 		return fmt.Errorf("node %s: %s: %w", node, t, err)
 	}
 	ta.Settle()
+	return nil
+}
+
+// Mission returns a node's mission status and current step.
+//
+// A mission runs on its own goroutine, so unlike Publish and Tick it is not
+// covered by Settle: use AwaitMission to wait for it.
+func (ta *TestApp) Mission(node string) (MissionStatus, string, error) {
+	nr, err := ta.node(node)
+	if err != nil {
+		return MissionIdle, "", err
+	}
+	if nr.mission == nil {
+		return MissionIdle, "", fmt.Errorf("conductor: node %q declares no mission", node)
+	}
+	s := nr.mission.snapshot()
+	return s.Status, s.Step, nil
+}
+
+// AwaitMission waits for a node's mission to reach a status, reporting the
+// status and step it was actually in if the timeout expires first.
+func (ta *TestApp) AwaitMission(node string, want MissionStatus, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	for {
+		got, step, err := ta.Mission(node)
+		if err != nil {
+			return err
+		}
+		if got == want {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("conductor: mission of %s is %s at step %s after %s, want %s",
+				node, got, step, timeout, want)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+// CancelMission stops a node's mission, as leaving the Active state would.
+func (ta *TestApp) CancelMission(node string) error {
+	nr, err := ta.node(node)
+	if err != nil {
+		return err
+	}
+	if nr.mission == nil {
+		return fmt.Errorf("conductor: node %q declares no mission", node)
+	}
+	nr.mission.stop(time.Second)
 	return nil
 }
 

@@ -1,0 +1,8 @@
+{
+  "app": "missionapp",
+  "externals": [
+    {"topic": "scan", "type": "sample_msgs/msg/Cloud", "role": "publisher", "qos": "reliable"},
+    {"topic": "cloud", "type": "sample_msgs/msg/Cloud", "role": "subscriber", "qos": "reliable"},
+    {"topic": "reading", "type": "sample_msgs/msg/Reading", "role": "subscriber", "qos": "reliable"}
+  ]
+}

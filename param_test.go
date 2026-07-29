@@ -108,7 +108,7 @@ func TestParamFileOverridesDefaults(t *testing.T) {
 	}
 
 	n := &Tunable{}
-	a, err := newAppWithParams("inproc", TransportOptions{}, "", values, n)
+	a, err := newAppWithParams("inproc", TransportOptions{}, "", values, nil, n)
 	if err != nil {
 		t.Fatal(err)
 	}

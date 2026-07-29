@@ -1,12 +1,13 @@
 # Conductor — Design
 
-*Status: v1.1 — static toolchain + pluggable-transport runtime, an
+*Status: v1.2 — static toolchain + pluggable-transport runtime, an
 rmw_zenoh transport verified against live ROS 2 (Lyrical) traffic,
 `.msg`/`.srv`/`.action`-to-Go codegen with local REP-2011 hash computation,
-lifecycle, parameters, observability, an in-process test harness, declared
-environments, and single-binary deployment with graph-derived systemd units.
-This document records the vision, the architecture, and the decisions still
-open.*
+lifecycle, parameters, observability with a built-in dashboard, an in-process
+test harness, declared environments, single-binary deployment with
+graph-derived systemd units, declarative missions, and a declared transform
+tree. This document records the vision, the architecture, and the decisions
+still open.*
 
 ## Thesis
 
@@ -99,6 +100,18 @@ declarations, so they cannot drift.
 | CND011 | warn  | topic published but never consumed |
 | CND012 | error | endpoints disagree on message type |
 | CND013 | error | QoS request-vs-offered incompatibility (reliability, durability) |
+| CND040 | error | mission transition (`next`/`fail`/literal `Goto`) names no such step |
+| CND041 | error | mission shape: unknown `start`, steps without a `Mission`, two missions on one node |
+| CND042 | warn  | step unreachable from the start step |
+| CND043 | error | invalid `timeout`/`retry`/`backoff` on a step |
+| CND050 | error | `frame:` tag names a frame the transform tree does not declare |
+| CND051 | error | a frame has more than one parent |
+| CND052 | error | the transform tree contains a cycle |
+| CND053 | error | the transform tree has more than one root |
+| CND054 | error | a literal `TF.Lookup` cannot be resolved from static transforms |
+| CND055 | warn  | static transforms declared but no node declares `conductor.TF` |
+| CND056 | warn/error | endpoints of one topic declare different frames (error if nothing connects them) |
+| CND057 | error | `frame:` tag on a message type with no `Header` |
 
 ## The transport decision (RESOLVED: Zenoh-native, shipped in v0.2)
 
@@ -169,12 +182,12 @@ consolidation explicitly, with a comment) are the exact places bugs hide.
 | Services | boilerplate | `Svc[Req,Res]` / `Client[Req,Res]` fields, graph-validated, rmw_zenoh querier/queryable wire format, `.srv` codegen | ✅ v0.4 |
 | Actions (server) | boilerplate | `Action[G,F,R]` fields over the 3-service/2-topic convention; goal state machine, per-goal goroutines, context cancellation; `.action` codegen | ✅ v0.5 |
 | Actions (client, e.g. calling Nav2) | boilerplate | `ActionClient[G,F,R]` with goal handles, feedback channels, cancellation | ✅ v0.6 |
-| Observability | `/rosout` + prayer | a span per callback with W3C trace context propagated through messages; Prometheus metrics per node/topic/callback; a built-in dashboard (graph, live rates, lifecycle, parameters, traces) served by the app itself | ✅ v0.8, dashboard v1.2 |
+| Observability | `/rosout` + prayer | a span per callback with W3C trace context propagated through messages; Prometheus metrics per node/topic/callback; a built-in dashboard (graph, live rates, lifecycle, parameters, traces, missions, frames) served by the app itself | ✅ v0.8, dashboard v1.2 |
 | Testing | `launch_testing` | the whole app inside `go test`: in-process transport, deterministic timers, settle-not-sleep, typed publish/record/call | ✅ v1.0 |
 | Deployment | colcon + rosdep + apt | `conductor deploy`: cross-compiled binary, release bundle with a manifest, systemd units whose ordering is the graph's bringup order, ssh install, rollback | ✅ v1.1 |
 | Per-env config (sim/dev/robot-N) | copy-pasted YAML | `environments.json`: per-environment externals, transport, parameter overlays and deploy target; `check/graph/build/deploy -env` | ✅ v1.1 |
-| Task orchestration (state machines/BTs) | XML/hand-rolled | declarative mission layer | v1.2 |
-| TF conventions | boilerplate | declared static transforms, frame checks in graph | v1.2 |
+| Task orchestration (state machines/BTs) | XML/hand-rolled | `Mission`/`Step` fields with tagged transitions; targets checked (including literal `Goto`s), unreachable steps warned, machine drawn in mission.dot, current step observable | ✅ v1.2 |
+| TF conventions | `static_transform_publisher` in a launch file | `frames.json` published on tf_static, `TF.Lookup` composition, `frame:` tags that stamp and check headers, tree checked at build time | ✅ v1.2 |
 
 ## Observability (v0.8, implemented)
 
@@ -231,6 +244,57 @@ Three decisions worth recording:
 Tracing stays opt-in — a span per callback is not free — and the page is one
 embedded self-contained file, because the machine that most needs the view is
 a robot with no route to a CDN.
+
+## Missions and frames (v1.2, implemented)
+
+The two remaining lines of the 80% table were the two places where ROS still
+keeps the application's structure somewhere the compiler cannot see it: a
+behaviour tree in XML, and a transform tree in launch-file arguments. Both
+become declarations.
+
+**A mission is a state machine of fields.** `Mission` names the start step,
+`Step` fields name their own transitions (`next`, `fail`, `timeout`, `retry`,
+`backoff`), and the handler is `On<Step>(*Task) error`, found by the same
+convention as every other callback. Three consequences follow, and they are
+the argument for the whole approach:
+
+- **The transitions are checked.** A `next:` naming no step is a build error.
+  So is `t.Goto("recharge")` when it is written with a string literal — the
+  scanner collects those calls and resolves them against the same step set,
+  which is a syntactic scanner earning its keep: the branches taken in code
+  are held to the declarations, not just the ones written in tags.
+- **The lifecycle owns it.** A mission starts when its node reaches Active and
+  is canceled when it leaves, so `ros2 lifecycle set` stops a task in flight,
+  and a step's `Task.Context()` is what makes that real. Steps run on the
+  mission's own goroutine — long-running by nature, like action handlers —
+  with `Task.Do` for the moments they must touch executor-owned state.
+- **The view is free.** Current step, attempts, entries and durations are
+  metrics and spans; `conductor check` prints the machine, `gen/mission.dot`
+  draws it, and the dashboard shows the live position on it.
+
+**The transform tree is configuration, not code.** `frames.json` declares
+static links (ours, published on `tf_static`) and dynamic ones (someone
+else's, with `by` naming the publisher). Declaring the dynamic links is what
+makes the tree whole: it lets the checker distinguish "that frame does not
+exist" from "that frame exists, but only a transform published at runtime
+reaches it", which is the difference between a typo and a lookup that belongs
+in a callback. Both the toolchain and the runtime read the file through the
+same loader, so the robot and the checker cannot disagree about where the
+lidar is; an environment may name a different file, because calibration is
+per-robot.
+
+A `frame:` tag then does on a topic what the QoS tag does for delivery: the
+publisher stamps the declared frame (and a timestamp) into the header, and a
+subscription verifies incoming ones, counting and naming a peer that sends
+another frame — once, not at the topic's rate. Verified against real ROS 2:
+`ros2 topic echo /tf_static` reads the tree as `tf2_msgs/msg/TFMessage`, and
+`tf2_ros tf2_echo base_link laser` reports the declared offset and yaw.
+
+Known gap: `tf_static` is republished at 1 Hz rather than latched, because
+transient-local durability is not implemented on either transport. A late
+joiner sees the tree within a second instead of immediately, which is
+acceptable for a static tree and not a reason to fake latching in the layer
+above.
 
 ## Testing (v1.0, implemented)
 
@@ -342,7 +406,19 @@ client.
    the cost of repetition), and a health gate between robots — roll on if
    the graph came up, stop if it did not. The runtime already knows whether
    every node reached Active, so the gate has something real to read.
-7. Services/actions API shape: `Svc[Req,Res]` with `OnField(Req) (Res,
+7. Mission composition: a mission is one machine per node, flat. Nested
+   missions (a step that runs a sub-machine) and concurrent branches are what
+   behaviour trees offer and this does not. Both are expressible today by
+   giving the sub-task its own node and driving it over an action — which
+   keeps every step observable and lifecycle-managed — but that is a heavier
+   answer than a `steps:` tag pointing at another machine. Worth revisiting
+   once real missions exist to argue from.
+8. Dynamic transforms: `TF` resolves the declared static tree, and a lookup
+   that crosses a dynamic link is refused rather than guessed. Consuming
+   `/tf` at runtime means a buffer with time interpolation and a policy for
+   extrapolation — a real feature, not a small one, and the declared tree is
+   what makes it checkable when it arrives.
+9. Services/actions API shape: `Svc[Req,Res]` with `OnField(Req) (Res,
    error)` is the obvious mirror; actions need goal/feedback/result and
    cancellation — design against Nav2's action servers as the reference
    consumer.

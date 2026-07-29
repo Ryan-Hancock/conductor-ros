@@ -16,6 +16,11 @@ type Pub[T any] struct {
 	publish func(any, Metadata) error
 	node    *nodeRuntime
 	sent    atomic.Uint64
+
+	// frame and header come from a frame tag: the runtime stamps the
+	// declared frame into every outgoing message's header.
+	frame  string
+	header *headerAccess
 }
 
 // Topic returns the wired topic name (empty before Run).
@@ -35,9 +40,14 @@ func (p *Pub[T]) Publish(msg T) {
 	if p.node != nil && !p.node.active() {
 		return
 	}
+	if p.header != nil {
+		p.header.stampFrame(reflect.ValueOf(&msg).Elem(), p.frame)
+	}
 	var md Metadata
 	if p.node != nil {
-		md.Trace = p.node.currentTrace
+		if tc := p.node.currentTrace.Load(); tc != nil {
+			md.Trace = *tc
+		}
 	}
 	if err := p.publish(msg, md); err != nil {
 		slog.Error("conductor: publish failed", "topic", p.topic, "err", err)
@@ -57,6 +67,10 @@ func (p *Pub[T]) bind(rt *runtimeState, nr *nodeRuntime, field reflect.StructFie
 	if err != nil {
 		return err
 	}
+	frame, header, err := frameTag(rt, field, reflect.TypeFor[T]())
+	if err != nil {
+		return err
+	}
 	spec := TopicSpec{Topic: topic, QoS: q, Type: reflect.TypeFor[T](), Node: nr.name}
 	publish, err := rt.transport.Publisher(spec)
 	if err != nil {
@@ -65,8 +79,9 @@ func (p *Pub[T]) bind(rt *runtimeState, nr *nodeRuntime, field reflect.StructFie
 	p.topic = topic
 	p.publish = publish
 	p.node = nr
+	p.frame, p.header = frame, header
 	rt.recordProvides(nr.name, topic)
 	rt.recordEndpoint(Endpoint{Node: nr.name, Kind: EndpointPub, Field: field.Name, Name: topic,
-		Type: rosTypeName(reflect.TypeFor[T]()), QoS: q.Name, count: countOf(p.sent.Load)})
+		Type: rosTypeName(reflect.TypeFor[T]()), QoS: q.Name, Frame: frame, count: countOf(p.sent.Load)})
 	return nil
 }

@@ -64,6 +64,8 @@ type Graph struct {
 	Topics   []*Topic
 	Services []*Service
 	Actions  []*ActionName
+	Machines []Machine // declared missions, one per node that has one
+	Frames   *conductor.FrameTree
 }
 
 // ActionName collects the endpoints of one action name.
@@ -176,7 +178,7 @@ func Build(app *scan.App) *Graph {
 			getAct(e.Topic).Clients = append(getAct(e.Topic).Clients, SvcEndpoint{Node: "(external)", External: true, RosType: e.Type})
 		}
 	}
-	g := &Graph{App: app}
+	g := &Graph{App: app, Machines: Machines(app), Frames: app.Frames}
 	for _, t := range topics {
 		g.Topics = append(g.Topics, t)
 	}
@@ -280,6 +282,9 @@ func Validate(app *scan.App) (*Graph, []Issue) {
 			checkHandler(add, n, ac.Field, scan.MethodSig{Params: 1, Results: 2}, pos)
 		}
 	}
+	validateMissions(add, app)
+	validateFrames(add, app)
+
 	for _, e := range app.Externals {
 		switch e.Role {
 		case "publisher", "subscriber":

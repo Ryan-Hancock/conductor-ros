@@ -18,8 +18,11 @@ import (
 	"path/filepath"
 	"reflect"
 	"sort"
+	"strconv"
 	"strings"
 	"unicode"
+
+	"conductor.dev/conductor"
 )
 
 type App struct {
@@ -30,8 +33,16 @@ type App struct {
 	// Messages maps a Go type reference as written in source (package-qualified,
 	// e.g. "msgs.Twist") to its ROS interface name ("geometry_msgs/msg/Twist"),
 	// collected from //ros:type directives across the module.
-	Messages  map[string]string
+	Messages map[string]string
+	// Stamped records which of those types carry a std_msgs/Header, which is
+	// what a frame tag needs to stamp.
+	Stamped   map[string]bool
 	Externals []External
+
+	// Frames is the declared transform tree (frames.json, or whatever the
+	// resolved environment names instead); nil when the app declares none.
+	Frames     *conductor.FrameTree
+	FramesFile string
 
 	// Environments are declared in environments.json (see environments.go).
 	// Env is the one this App has been resolved for, nil until Resolve.
@@ -54,8 +65,54 @@ type Node struct {
 	ActionClients []ActionEndpoint  // action clients (ActionClient fields)
 	Params        []Param
 	Timers        []Timer
+	Missions      []Mission // at most one; more than one is a validation error
+	Steps         []Step
+	TF            *TFDecl
 	// Methods maps method name to its signature shape for handler checks.
 	Methods map[string]MethodSig
+	// Calls are conductor calls made with string literals inside this node's
+	// methods — Task.Goto("recharge"), TF.Lookup("base_link", "laser") — so
+	// the checker can hold code to the same declarations the tags are held to.
+	Calls []Call
+}
+
+// Mission declares a node's task state machine (a conductor.Mission field).
+type Mission struct {
+	Field string
+	Name  string // snake_case field name
+	Start string
+	File  string
+	Line  int
+}
+
+// Step is one state of a node's mission (a conductor.Step field).
+type Step struct {
+	Field   string
+	Name    string // snake_case field name: what next/fail/Goto refer to
+	Next    string
+	Fail    string
+	Timeout string
+	Retry   string
+	Backoff string
+	File    string
+	Line    int
+}
+
+// Call is a call to a conductor method with string-literal arguments.
+type Call struct {
+	Method string   // "Goto", "Lookup"
+	Recv   string   // receiver expression as written, e.g. "t" or "p.TF"
+	In     string   // enclosing method name
+	Args   []string // literal arguments
+	File   string
+	Line   int
+}
+
+// TFDecl is a node's conductor.TF field: its access to the declared frames.
+type TFDecl struct {
+	Field string
+	File  string
+	Line  int
 }
 
 type MethodSig struct {
@@ -86,6 +143,7 @@ type Endpoint struct {
 	Field  string
 	Topic  string
 	QoS    string
+	Frame  string // frame tag: the TF frame this endpoint's messages are in
 	GoType string
 	File   string
 	Line   int
@@ -135,7 +193,7 @@ func ScanApp(dir string) (*App, error) {
 	if err != nil {
 		return nil, err
 	}
-	app := &App{Dir: abs, ModuleRoot: root, Messages: map[string]string{}}
+	app := &App{Dir: abs, ModuleRoot: root, Messages: map[string]string{}, Stamped: map[string]bool{}}
 
 	if b, err := os.ReadFile(filepath.Join(abs, "conductor.json")); err == nil {
 		var c config
@@ -151,9 +209,12 @@ func ScanApp(dir string) (*App, error) {
 	if err := loadEnvironments(abs, app); err != nil {
 		return nil, err
 	}
+	if err := loadFrames(abs, "frames.json", app); err != nil {
+		return nil, err
+	}
 
 	err = walkGoFiles(root, func(path string, f *ast.File, fset *token.FileSet) {
-		collectMessages(f, app.Messages)
+		collectMessages(f, app.Messages, app.Stamped)
 	})
 	if err != nil {
 		return nil, err
@@ -161,10 +222,11 @@ func ScanApp(dir string) (*App, error) {
 
 	var nodes []*Node
 	methodsByType := map[string]map[string]MethodSig{}
+	callsByType := map[string][]Call{}
 	err = walkGoFiles(abs, func(path string, f *ast.File, fset *token.FileSet) {
-		collectMessages(f, app.Messages)
+		collectMessages(f, app.Messages, app.Stamped)
 		collectNodes(path, f, fset, &nodes)
-		collectMethods(f, methodsByType)
+		collectMethods(path, f, fset, methodsByType, callsByType)
 	})
 	if err != nil {
 		return nil, err
@@ -174,6 +236,7 @@ func ScanApp(dir string) (*App, error) {
 		if n.Methods == nil {
 			n.Methods = map[string]MethodSig{}
 		}
+		n.Calls = callsByType[n.StructName]
 	}
 	sort.Slice(nodes, func(i, j int) bool { return nodes[i].Name < nodes[j].Name })
 	app.Nodes = nodes
@@ -244,7 +307,7 @@ func directiveValue(doc *ast.CommentGroup, prefix string) string {
 	return ""
 }
 
-func collectMessages(f *ast.File, out map[string]string) {
+func collectMessages(f *ast.File, out map[string]string, stamped map[string]bool) {
 	pkg := f.Name.Name
 	for _, decl := range f.Decls {
 		gd, ok := decl.(*ast.GenDecl)
@@ -262,9 +325,27 @@ func collectMessages(f *ast.File, out map[string]string) {
 			}
 			if rosName != "" {
 				out[pkg+"."+ts.Name.Name] = rosName
+				stamped[pkg+"."+ts.Name.Name] = hasHeaderField(ts.Type)
 			}
 		}
 	}
+}
+
+// hasHeaderField reports whether a message struct carries a Header, which is
+// what a frame tag needs somewhere to put the frame id.
+func hasHeaderField(e ast.Expr) bool {
+	st, ok := e.(*ast.StructType)
+	if !ok {
+		return false
+	}
+	for _, f := range st.Fields.List {
+		for _, name := range f.Names {
+			if name.Name == "Header" {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func collectNodes(path string, f *ast.File, fset *token.FileSet, out *[]*Node) {
@@ -315,6 +396,7 @@ func addField(n *Node, pkg string, field *ast.Field, path string, fset *token.Fi
 			Field:  fname,
 			Topic:  tag.Get("topic"),
 			QoS:    tag.Get("qos"),
+			Frame:  tag.Get("frame"),
 			GoType: qualify(pkg, args[0]),
 			File:   path,
 			Line:   line,
@@ -361,6 +443,24 @@ func addField(n *Node, pkg string, field *ast.Field, path string, fset *token.Fi
 		n.Params = append(n.Params, Param{Field: fname, Name: name, Default: tag.Get("default"), GoType: args[0]})
 	case "Timer":
 		n.Timers = append(n.Timers, Timer{Field: fname, Rate: tag.Get("rate"), File: path, Line: line})
+	case "Mission":
+		n.Missions = append(n.Missions, Mission{
+			Field: fname, Name: SnakeCase(fname), Start: tag.Get("start"), File: path, Line: line,
+		})
+	case "Step":
+		n.Steps = append(n.Steps, Step{
+			Field:   fname,
+			Name:    SnakeCase(fname),
+			Next:    tag.Get("next"),
+			Fail:    tag.Get("fail"),
+			Timeout: tag.Get("timeout"),
+			Retry:   tag.Get("retry"),
+			Backoff: tag.Get("backoff"),
+			File:    path,
+			Line:    line,
+		})
+	case "TF":
+		n.TF = &TFDecl{Field: fname, File: path, Line: line}
 	}
 }
 
@@ -397,9 +497,14 @@ func conductorField(e ast.Expr) (kind string, args []string) {
 		case len(x.Indices) == 3 && (sel.Sel.Name == "Action" || sel.Sel.Name == "ActionClient"):
 			return sel.Sel.Name, []string{types.ExprString(x.Indices[0]), types.ExprString(x.Indices[1]), types.ExprString(x.Indices[2])}
 		}
-	case *ast.SelectorExpr:
-		if id, ok := x.X.(*ast.Ident); ok && id.Name == "conductor" && x.Sel.Name == "Timer" {
-			return "Timer", []string{""}
+	case *ast.SelectorExpr: // no type parameters: Timer, Mission, Step, TF
+		id, ok := x.X.(*ast.Ident)
+		if !ok || id.Name != "conductor" {
+			return "", nil
+		}
+		switch x.Sel.Name {
+		case "Timer", "Mission", "Step", "TF":
+			return x.Sel.Name, []string{""}
 		}
 	}
 	return "", nil
@@ -422,7 +527,7 @@ func parseTag(lit *ast.BasicLit) reflect.StructTag {
 	return reflect.StructTag(strings.Trim(lit.Value, "`"))
 }
 
-func collectMethods(f *ast.File, out map[string]map[string]MethodSig) {
+func collectMethods(path string, f *ast.File, fset *token.FileSet, out map[string]map[string]MethodSig, calls map[string][]Call) {
 	for _, decl := range f.Decls {
 		fd, ok := decl.(*ast.FuncDecl)
 		if !ok || fd.Recv == nil || len(fd.Recv.List) == 0 {
@@ -439,7 +544,53 @@ func collectMethods(f *ast.File, out map[string]map[string]MethodSig) {
 			Params:  fd.Type.Params.NumFields(),
 			Results: fd.Type.Results.NumFields(),
 		}
+		calls[recv] = append(calls[recv], literalCalls(path, fd, fset)...)
 	}
+}
+
+// literalCalls finds the conductor calls in a method body whose arguments are
+// all string literals — Goto("recharge"), Lookup("base_link", "laser") — so
+// the checker can resolve them against the declarations. Anything computed is
+// simply not checked, which is the honest limit of a syntactic scanner.
+func literalCalls(path string, fd *ast.FuncDecl, fset *token.FileSet) []Call {
+	var out []Call
+	ast.Inspect(fd.Body, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		sel, ok := call.Fun.(*ast.SelectorExpr)
+		if !ok {
+			return true
+		}
+		switch sel.Sel.Name {
+		case "Goto", "Lookup":
+		default:
+			return true
+		}
+		args := make([]string, 0, len(call.Args))
+		for _, a := range call.Args {
+			lit, ok := a.(*ast.BasicLit)
+			if !ok || lit.Kind != token.STRING {
+				return true
+			}
+			s, err := strconv.Unquote(lit.Value)
+			if err != nil {
+				return true
+			}
+			args = append(args, s)
+		}
+		out = append(out, Call{
+			Method: sel.Sel.Name,
+			Recv:   types.ExprString(sel.X),
+			In:     fd.Name.Name,
+			Args:   args,
+			File:   path,
+			Line:   fset.Position(call.Pos()).Line,
+		})
+		return true
+	})
+	return out
 }
 
 func receiverTypeName(e ast.Expr) string {

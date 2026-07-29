@@ -248,3 +248,66 @@ func TestAwait(t *testing.T) {
 		t.Fatalf("speed = %v, want 0.9", got.Speed)
 	}
 }
+
+// surveyMission is a two-step mission that publishes from a step.
+type surveyMission struct {
+	Out conductor.Pub[command] `topic:"cmd"`
+
+	Run     conductor.Mission `start:"drive"`
+	Drive   conductor.Step    `next:"park" fail:"park"`
+	Park    conductor.Step    `next:"done"`
+	Refused conductor.Step    `next:"done"`
+
+	fail bool
+}
+
+func (s *surveyMission) OnDrive(t *conductor.Task) error {
+	if s.fail {
+		return errors.New("stuck")
+	}
+	s.Out.Publish(command{Speed: 1})
+	return nil
+}
+
+func (s *surveyMission) OnPark(t *conductor.Task) error {
+	s.Out.Publish(command{Speed: 0})
+	return nil
+}
+
+func (s *surveyMission) OnRefused(t *conductor.Task) error { return nil }
+
+// A test drives a mission the way it drives anything else: it waits for the
+// machine to get somewhere, then asserts on what came out.
+func TestMissionRunsUnderTest(t *testing.T) {
+	// Manual lifecycle so the watch is in place before the mission starts:
+	// activating a node is what sets its mission going.
+	app := conductortest.RunWith(t, conductortest.Options{ManualLifecycle: true}, &surveyMission{})
+	cmd := conductortest.Watch[command](app, "cmd")
+	app.Transition("survey_mission", conductor.TransitionConfigure)
+	app.Transition("survey_mission", conductor.TransitionActivate)
+
+	app.AwaitMission("survey_mission", conductor.MissionDone, 2*time.Second)
+	app.Settle()
+
+	if status, step := app.Mission("survey_mission"); status != conductor.MissionDone || step != conductor.StepDone {
+		t.Fatalf("mission %s at %s, want done", status, step)
+	}
+	if cmd.Len() != 2 {
+		t.Fatalf("%d commands published by the mission, want 2", cmd.Len())
+	}
+	if got, _ := cmd.Last(); got.Speed != 0 {
+		t.Fatalf("last command %v, want the parked 0", got)
+	}
+}
+
+// The fail branch is part of the declaration, so a test can exercise it by
+// making the step fail.
+func TestMissionFailBranch(t *testing.T) {
+	app := conductortest.Run(t, &surveyMission{fail: true})
+	app.AwaitMission("survey_mission", conductor.MissionDone, 2*time.Second)
+	app.Settle()
+
+	if status, _ := app.Mission("survey_mission"); status != conductor.MissionDone {
+		t.Fatalf("mission %s, want it to have recovered through park", status)
+	}
+}

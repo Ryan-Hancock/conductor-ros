@@ -102,6 +102,31 @@ svg { display: block; width: 100%; height: auto; }
 .empty { color: var(--dim); font-size: 13px; padding: 4px 0; }
 .filter { font: inherit; font-size: 12px; padding: 3px 8px; border: 1px solid var(--line);
   border-radius: 5px; background: var(--bg); color: var(--ink); width: 220px; }
+.mission { border-top: 1px solid var(--line); padding: 12px 0; }
+.mission:first-child { border-top: 0; padding-top: 0; }
+.mission .hdr { display: flex; align-items: baseline; gap: 9px; font-size: 13px; margin-bottom: 9px; }
+.mission .hdr b { font-weight: 600; }
+.mission .hdr .why { color: var(--bad); font-size: 12px; }
+.chain { display: flex; flex-wrap: wrap; align-items: stretch; gap: 6px; }
+.step { border: 1px solid var(--line); border-radius: 6px; padding: 5px 9px; min-width: 96px; }
+.step .n { font-family: var(--mono); font-size: 12px; }
+.step .d { color: var(--dim); font-size: 10.5px; white-space: nowrap; }
+.step.current { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
+.step.current .n { color: var(--accent); font-weight: 600; }
+.step.term { border-style: dashed; min-width: 0; }
+.arrow { align-self: center; color: var(--dim); font-size: 12px; }
+.status { font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; font-weight: 600; }
+.status.running { color: var(--accent); }
+.status.failed { color: var(--bad); }
+.status.canceled, .status.idle { color: var(--dim); }
+.status.done { color: var(--ink); }
+.frame { display: grid; grid-template-columns: 1fr auto; gap: 10px; padding: 3px 0;
+  border-top: 1px dotted var(--line); font-size: 12.5px; }
+.frame:first-child { border-top: 0; }
+.frame .link { font-family: var(--mono); }
+.frame .link em { color: var(--dim); font-style: normal; }
+.frame .kind { color: var(--dim); font-size: 11px; white-space: nowrap; }
+.frame.dyn .link { color: var(--dim); }
 .hdrrow { display: flex; align-items: center; gap: 10px; padding: 9px 16px; border-bottom: 1px solid var(--line); }
 .hdrrow h2 { border: 0; padding: 0; margin: 0; flex: 1; font-size: 12px; text-transform: uppercase;
   letter-spacing: 0.07em; color: var(--dim); font-weight: 600; }
@@ -127,6 +152,11 @@ svg { display: block; width: 100%; height: auto; }
     <div class="nodes" id="nodes"></div>
   </section>
 
+  <section id="missionsec" hidden>
+    <div class="hdrrow"><h2>missions</h2><span class="chip" id="missionhint"></span></div>
+    <div class="body" id="missions"></div>
+  </section>
+
   <section>
     <h2>topics</h2>
     <div class="body">
@@ -136,6 +166,11 @@ svg { display: block; width: 100%; height: auto; }
         <tbody id="topics"></tbody>
       </table>
     </div>
+  </section>
+
+  <section id="framesec" hidden>
+    <div class="hdrrow"><h2>transforms</h2><span class="chip" id="framehint"></span></div>
+    <div class="body" id="frames"></div>
   </section>
 
   <section>
@@ -267,8 +302,9 @@ function renderNodes(s, dt) {
       const r = rate(`ep:${n.name}:${e.kind}:${e.name}`, e.counts, dt);
       const detail = e.type ? `<em> ${esc(e.type)}</em>` : e.rate ? `<em> ${esc(e.rate)}</em>` : "";
       const qos = e.qos ? ` <span class="chip">${esc(e.qos)}</span>` : "";
+      const frame = e.frame ? ` <span class="chip">${esc(e.frame)}</span>` : "";
       return `<div class="ep"><span class="kind">${esc(e.kind)}</span>
-        <span class="name">${esc(e.name)}${qos}${detail}</span>
+        <span class="name">${esc(e.name)}${qos}${frame}${detail}</span>
         <span class="rate">${e.counts}${r ? ` &middot; <b>${fmtRate(r)}/s</b>` : ""}</span></div>`;
     }).join("");
     const params = n.params.length ? `<div class="params">${n.params.map((p) =>
@@ -324,6 +360,57 @@ function renderTopics(s, dt, flows) {
       <td class="num">${t.sent}</td><td class="num">${t.received}</td>
       <td class="num">${fmtRate(r)}</td></tr>`;
   }).join("") || `<tr><td colspan="8" class="empty">no topics</td></tr>`;
+}
+
+// A mission is drawn as the declared chain with the live position on it: the
+// same machine conductor check prints and mission.dot renders.
+function renderMissions(s) {
+  const box = $("missionsec");
+  box.hidden = !s.missions.length;
+  if (box.hidden) return;
+  const running = s.missions.filter((m) => m.status === "running").length;
+  $("missionhint").textContent = `${running} of ${s.missions.length} running`;
+  $("missions").innerHTML = s.missions.map((m) => {
+    const chain = m.steps.map((st) => {
+      const notes = [];
+      if (st.timeout) notes.push("timeout " + st.timeout);
+      if (st.retry) notes.push("retry " + st.retry);
+      if (st.fail) notes.push("fail → " + st.fail);
+      const count = st.entries ? `${st.entries}×` : "";
+      return `<div class="step${st.current ? " current" : ""}">
+        <div class="n">${esc(st.name)} <span class="d">${count}</span></div>
+        <div class="d">${esc(notes.join(" · ") || "→ " + st.next)}</div></div>`;
+    }).join('<span class="arrow">→</span>');
+    const term = m.status === "done" || m.status === "failed"
+      ? `<span class="arrow">→</span><div class="step term"><div class="n">${esc(m.status)}</div></div>` : "";
+    const where = m.status === "running"
+      ? `at <b>${esc(m.step)}</b> for ${m.elapsed_seconds.toFixed(1)}s${m.attempt > 1 ? `, attempt ${m.attempt}` : ""}`
+      : "";
+    return `<div class="mission">
+      <div class="hdr"><b>${esc(m.node)}</b> <span class="chip">${esc(m.name)}</span>
+        <span class="status ${esc(m.status)}">${esc(m.status)}</span>
+        <span style="color:var(--dim);font-size:12px">${where}</span>
+        ${m.err ? `<span class="why">${esc(m.err)}</span>` : ""}</div>
+      <div class="chain">${chain}${term}</div></div>`;
+  }).join("");
+}
+
+function renderFrames(s) {
+  const box = $("framesec");
+  box.hidden = !s.frames.length;
+  if (box.hidden) return;
+  const statics = s.frames.filter((f) => !f.dynamic).length;
+  $("framehint").textContent = `${statics} static, ${s.frames.length - statics} dynamic`;
+  $("frames").innerHTML = s.frames.map((f) => {
+    const xyz = f.xyz.map((v) => v.toFixed(3)).join(" ");
+    const rpy = f.rpy.map((v) => v.toFixed(3)).join(" ");
+    const detail = f.dynamic
+      ? `published by ${esc(f.by || "an external node")}`
+      : `xyz ${xyz} · rpy ${rpy}`;
+    return `<div class="frame${f.dynamic ? " dyn" : ""}">
+      <span class="link">${esc(f.parent)} → ${esc(f.child)} <em>${esc(detail)}</em></span>
+      <span class="kind">${f.dynamic ? "dynamic" : "static · tf_static"}</span></div>`;
+  }).join("");
 }
 
 function renderTraces(s) {
@@ -394,6 +481,8 @@ async function tick() {
   if (!document.activeElement || !document.activeElement.matches(".param input")) renderNodes(s, dt);
   renderGraph(s, flows);
   renderTopics(s, dt, flows);
+  renderMissions(s);
+  renderFrames(s);
   renderTraces(s);
   renderMetrics(s, dt);
   prev = s; prevAt = now;

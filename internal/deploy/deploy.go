@@ -294,6 +294,17 @@ func build(app *scan.App, g *graph.Graph, dep gen.Deployment, o Options, stage s
 			return nil, err
 		}
 	}
+	// The transform tree ships with the release: the robot's geometry is
+	// part of what is deployed, not something to install separately.
+	if app.FramesFile != "" {
+		src, err := os.ReadFile(filepath.Join(app.Dir, app.FramesFile))
+		if err != nil {
+			return nil, fmt.Errorf("frames file: %w", err)
+		}
+		if err := write("frames.json", string(src), 0o644); err != nil {
+			return nil, err
+		}
+	}
 	launchBin := path.Join(dep.CurrentDir(), "bin", app.Name)
 	if err := write(app.Name+".launch.xml", gen.LaunchXML(g, launchBin), 0o644); err != nil {
 		return nil, err
@@ -428,6 +439,9 @@ func runtimeFlags(app *scan.App, o Options) []string {
 	flags = append(flags, "-params", path.Join(current, "params.yaml"))
 	for _, pf := range env.Params {
 		flags = append(flags, "-params", path.Join(current, filepath.Base(pf)))
+	}
+	if app.FramesFile != "" {
+		flags = append(flags, "-frames", path.Join(current, "frames.json"))
 	}
 	if env.Trace {
 		flags = append(flags, "-trace")

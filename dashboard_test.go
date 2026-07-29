@@ -266,3 +266,66 @@ func findNode(t *testing.T, s DashboardState, name string) NodeView {
 	t.Fatalf("no node %q in state", name)
 	return NodeView{}
 }
+
+// The dashboard shows the mission machine with the live position on it, and
+// the transform tree the process is publishing.
+func TestDashboardShowsMissionsAndFrames(t *testing.T) {
+	c := &courier{blocking: make(chan struct{}), stopped: make(chan struct{})}
+	a, err := newAppOpts(appOptions{transport: "inproc", manualTimers: true, frames: loadTree(t, robotFrames)}, c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := a.bringUp(); err != nil {
+		t.Fatal(err)
+	}
+	defer a.stop()
+	d := &dashboard{app: a, transport: "inproc", started: time.Now()}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for c.Trip.Step() != "transit" && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	s := d.state()
+
+	if len(s.Missions) != 1 {
+		t.Fatalf("missions = %v, want one", s.Missions)
+	}
+	m := s.Missions[0]
+	if m.Node != "courier" || m.Name != "trip" || m.Status != string(MissionRunning) {
+		t.Fatalf("mission view = %+v", m)
+	}
+	if m.Step != "transit" {
+		t.Fatalf("step = %q, want the one actually running", m.Step)
+	}
+	var current []string
+	for _, st := range m.Steps {
+		if st.Current {
+			current = append(current, st.Name)
+		}
+	}
+	if len(current) != 1 || current[0] != "transit" {
+		t.Fatalf("steps marked current = %v, want [transit]", current)
+	}
+	if len(m.Steps) != 4 {
+		t.Fatalf("%d steps in the view, want the four declared", len(m.Steps))
+	}
+
+	if len(s.Frames) != 4 {
+		t.Fatalf("frames = %v, want the declared four", s.Frames)
+	}
+	dynamic := 0
+	for _, f := range s.Frames {
+		if f.Dynamic {
+			dynamic++
+			if f.By == "" {
+				t.Errorf("dynamic transform %s -> %s does not say who publishes it", f.Parent, f.Child)
+			}
+		}
+	}
+	if dynamic != 2 {
+		t.Fatalf("%d dynamic transforms, want 2", dynamic)
+	}
+
+	close(c.blocking)
+	c.Trip.Cancel()
+}

@@ -47,6 +47,11 @@ type Environment struct {
 	Externals []External `json:"externals"`
 	Without   []string   `json:"without"`
 
+	// Frames names a transform tree file to use instead of frames.json:
+	// sensor calibration differs from robot to robot, which is what an
+	// environment is.
+	Frames string `json:"frames"`
+
 	// Metrics and Trace default the corresponding runtime flags.
 	Metrics string `json:"metrics_addr"`
 	Trace   bool   `json:"trace"`
@@ -129,6 +134,9 @@ func (a *App) Resolve(name string) (*App, error) {
 	out := *a
 	out.Env = env
 	out.Externals = mergeExternals(a.Externals, env)
+	if err := resolveFrames(a, env, &out); err != nil {
+		return nil, err
+	}
 	return &out, nil
 }
 

@@ -165,6 +165,26 @@ func printReport(app *scan.App, g *graph.Graph, issues []graph.Issue) {
 			}
 			fmt.Printf("    param %s %s = %s\n", p.Name, p.GoType, def)
 		}
+		if n.TF != nil {
+			fmt.Printf("    tf    %s\n", framesSummary(app))
+		}
+	}
+
+	if len(g.Machines) > 0 {
+		fmt.Println("\nmissions:")
+		for _, m := range g.Machines {
+			fmt.Printf("  %s: %s, starting at %s\n", m.Node, m.Name, m.Start)
+			for _, s := range m.Steps {
+				fmt.Printf("    %-14s -> %s%s\n", s.Name, strings.Join(s.Targets(), ", "), stepNotes(s))
+			}
+		}
+	}
+
+	if links := graph.FrameLinks(g.Frames); len(links) > 0 {
+		fmt.Printf("\nframes (%s):\n", app.FramesFile)
+		for _, l := range links {
+			fmt.Println("  " + l)
+		}
 	}
 
 	fmt.Println("\ntopics:")
@@ -305,6 +325,32 @@ func runTest(args []string) error {
 		return fmt.Errorf("go test: %w", err)
 	}
 	return nil
+}
+
+func framesSummary(app *scan.App) string {
+	if app.Frames == nil {
+		return "no transform tree declared"
+	}
+	return fmt.Sprintf("%d frame(s), %d static transform(s) published on tf_static",
+		len(app.Frames.Frames()), len(app.Frames.Static()))
+}
+
+func stepNotes(s graph.MachineStep) string {
+	var notes []string
+	for _, n := range []struct{ label, value string }{
+		{"timeout", s.Timeout}, {"retry", s.Retry}, {"backoff", s.Backoff},
+	} {
+		if n.value != "" {
+			notes = append(notes, n.label+" "+n.value)
+		}
+	}
+	if !s.Reachable {
+		notes = append(notes, "unreachable")
+	}
+	if len(notes) == 0 {
+		return ""
+	}
+	return "   [" + strings.Join(notes, ", ") + "]"
 }
 
 func rosOrGo(app *scan.App, goType string) string {

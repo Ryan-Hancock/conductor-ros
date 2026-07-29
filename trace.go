@@ -65,6 +65,7 @@ const (
 	SpanService      SpanKind = "service"
 	SpanAction       SpanKind = "action"
 	SpanLifecycle    SpanKind = "lifecycle"
+	SpanStep         SpanKind = "step"
 )
 
 // Span is one unit of traced work: a single callback invocation.

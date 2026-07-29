@@ -57,3 +57,74 @@ func TestScanApp(t *testing.T) {
 		t.Errorf("externals = %+v", app.Externals)
 	}
 }
+
+// Missions, frames and the calls written in code all come out of the same
+// syntactic pass.
+func TestScanMissionsAndFrames(t *testing.T) {
+	app, err := ScanApp(filepath.Join("testdata", "missionapp"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var courier, perception *Node
+	for _, n := range app.Nodes {
+		switch n.Name {
+		case "courier":
+			courier = n
+		case "perception":
+			perception = n
+		}
+	}
+	if courier == nil || perception == nil {
+		t.Fatalf("nodes = %+v, want courier and perception", app.Nodes)
+	}
+
+	if len(courier.Missions) != 1 || courier.Missions[0].Start != "pickup" || courier.Missions[0].Name != "trip" {
+		t.Fatalf("missions = %+v", courier.Missions)
+	}
+	if len(courier.Steps) != 5 {
+		t.Fatalf("%d steps, want 5: %+v", len(courier.Steps), courier.Steps)
+	}
+	transit := courier.Steps[1]
+	if transit.Name != "transit" || transit.Next != "dropof" || transit.Fail != "recharge" || transit.Timeout != "2m" {
+		t.Errorf("transit = %+v", transit)
+	}
+
+	// Task.Goto with a literal argument is recorded against the method it is
+	// written in, which is what ties a transition to its step.
+	var gotos []Call
+	for _, c := range courier.Calls {
+		if c.Method == "Goto" {
+			gotos = append(gotos, c)
+		}
+	}
+	if len(gotos) != 1 || gotos[0].In != "OnTransit" || gotos[0].Args[0] != "nowhere" {
+		t.Errorf("goto calls = %+v", gotos)
+	}
+
+	if perception.TF == nil || perception.TF.Field != "TF" {
+		t.Errorf("perception TF = %+v", perception.TF)
+	}
+	if perception.Pubs[0].Frame != "camera" {
+		t.Errorf("frame tag = %q, want camera", perception.Pubs[0].Frame)
+	}
+	var lookups []Call
+	for _, c := range perception.Calls {
+		if c.Method == "Lookup" {
+			lookups = append(lookups, c)
+		}
+	}
+	if len(lookups) != 1 || lookups[0].Recv != "p.TF" || lookups[0].Args[1] != "laser" {
+		t.Errorf("lookup calls = %+v", lookups)
+	}
+
+	if app.Frames == nil || app.FramesFile != "frames.json" {
+		t.Fatalf("frames = %+v, file %q", app.Frames, app.FramesFile)
+	}
+	if len(app.Frames.Static()) != 1 || len(app.Frames.Transforms) != 3 {
+		t.Errorf("frames = %+v", app.Frames.Transforms)
+	}
+	if !app.Stamped["main.Cloud"] || app.Stamped["main.Reading"] {
+		t.Errorf("stamped = %+v; Cloud has a Header, Reading does not", app.Stamped)
+	}
+}

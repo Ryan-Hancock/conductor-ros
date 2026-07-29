@@ -26,6 +26,11 @@ type runtimeState struct {
 	deps        map[string]*nodeDeps
 	endpoints   []Endpoint
 	paramValues map[string]map[string]string // node name -> parameter -> raw value
+
+	// frames is the declared transform tree; tfPublisher names the node in
+	// this process that publishes it on tf_static, if any.
+	frames      *FrameTree
+	tfPublisher string
 }
 
 // binder is implemented by the framework field types (Sub, Pub, Param, Timer);
@@ -57,6 +62,7 @@ func Run(nodes ...any) {
 	traceLog := fs.Bool("trace", false, "log a span for every callback, with W3C trace context")
 	dashAddr := fs.String("dashboard", "", "serve the live dashboard on this address (e.g. :4000)")
 	dashTraces := fs.Int("dashboard-traces", 0, "record this many recent spans for the dashboard's trace view (implies tracing)")
+	framesFile := fs.String("frames", "frames.json", "transform tree to publish and look up (see frames.json)")
 	var paramFiles stringList
 	fs.Var(&paramFiles, "params", "parameter file to load (repeatable; later files win)")
 	env := fs.String("env", "", "environment name: also loads params.<env>.yaml next to the last -params file, or ./params.<env>.yaml")
@@ -76,6 +82,21 @@ func Run(nodes ...any) {
 		slog.Info("conductor: loaded parameters", "files", strings.Join(files, ","), "env", *env)
 	}
 
+	framesPath, err := findFramesFile(*framesFile, explicitlySet(fs, "frames"))
+	if err != nil {
+		slog.Error("conductor: transform tree", "err", err)
+		os.Exit(1)
+	}
+	frames, err := LoadFrames(framesPath)
+	if err != nil {
+		slog.Error("conductor: loading frames", "err", err)
+		os.Exit(1)
+	}
+	if frames != nil {
+		slog.Info("conductor: loaded transforms", "file", framesPath,
+			"static", len(frames.Static()), "frames", len(frames.Frames()))
+	}
+
 	if *traceLog {
 		AddExporter(LogExporter{})
 	}
@@ -85,7 +106,7 @@ func Run(nodes ...any) {
 		os.Exit(1)
 	}
 
-	a, err := newAppWithParams(*transportName, TransportOptions{Endpoint: *endpoint, Domain: *domain}, *only, values, nodes...)
+	a, err := newAppWithParams(*transportName, TransportOptions{Endpoint: *endpoint, Domain: *domain}, *only, values, frames, nodes...)
 	if err != nil {
 		slog.Error("conductor: startup failed", "err", err)
 		os.Exit(1)
@@ -208,6 +229,48 @@ func resolveParamFiles(explicit []string, env string) ([]string, error) {
 	return append(files, envFile), nil
 }
 
+// explicitlySet reports whether a flag was given on the command line, as
+// opposed to left at its default.
+func explicitlySet(fs *flag.FlagSet, name string) bool {
+	set := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == name {
+			set = true
+		}
+	})
+	return set
+}
+
+// findFramesFile resolves -frames. A file named explicitly must exist —
+// silently running a robot without its calibration is the failure this whole
+// mechanism exists to prevent. The default name is looked for in the working
+// directory and then beside the binary (and its parents), so a release
+// installed as current/bin/app finds current/frames.json.
+func findFramesFile(path string, explicit bool) (string, error) {
+	if explicit {
+		if _, err := os.Stat(path); err != nil {
+			return "", fmt.Errorf("frames file %s: %w", path, err)
+		}
+		return path, nil
+	}
+	if _, err := os.Stat(path); err == nil {
+		return path, nil
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		return path, nil
+	}
+	dir := filepath.Dir(exe)
+	for i := 0; i < 3; i++ {
+		p := filepath.Join(dir, filepath.Base(path))
+		if _, err := os.Stat(p); err == nil {
+			return p, nil
+		}
+		dir = filepath.Dir(dir)
+	}
+	return path, nil // absent: an application may declare no frames
+}
+
 // appOptions is everything Run's flags (or a test harness) can vary about
 // how an application is wired.
 type appOptions struct {
@@ -216,14 +279,15 @@ type appOptions struct {
 	only         string                       // run only this node
 	params       map[string]map[string]string // node -> parameter -> raw value
 	manualTimers bool                         // do not start tickers; fire timers explicitly
+	frames       *FrameTree                   // declared transform tree, if any
 }
 
 func newApp(transportName string, topts TransportOptions, only string, nodeStructs ...any) (*app, error) {
 	return newAppOpts(appOptions{transport: transportName, topts: topts, only: only}, nodeStructs...)
 }
 
-func newAppWithParams(transportName string, topts TransportOptions, only string, values map[string]map[string]string, nodeStructs ...any) (*app, error) {
-	return newAppOpts(appOptions{transport: transportName, topts: topts, only: only, params: values}, nodeStructs...)
+func newAppWithParams(transportName string, topts TransportOptions, only string, values map[string]map[string]string, frames *FrameTree, nodeStructs ...any) (*app, error) {
+	return newAppOpts(appOptions{transport: transportName, topts: topts, only: only, params: values, frames: frames}, nodeStructs...)
 }
 
 func newAppOpts(o appOptions, nodeStructs ...any) (*app, error) {
@@ -231,7 +295,7 @@ func newAppOpts(o appOptions, nodeStructs ...any) (*app, error) {
 	if err != nil {
 		return nil, err
 	}
-	rt := &runtimeState{transport: tr, paramValues: o.params}
+	rt := &runtimeState{transport: tr, paramValues: o.params, frames: o.frames}
 	for _, ns := range nodeStructs {
 		ptr := reflect.ValueOf(ns)
 		if ptr.Kind() != reflect.Pointer || ptr.Elem().Kind() != reflect.Struct {
@@ -261,6 +325,9 @@ func newAppOpts(o appOptions, nodeStructs ...any) (*app, error) {
 		}
 		if err := bindParamServices(rt, nr); err != nil {
 			return nil, fmt.Errorf("%s parameters: %w", t.Name(), err)
+		}
+		if err := wireMission(rt, nr); err != nil {
+			return nil, fmt.Errorf("%s mission: %w", t.Name(), err)
 		}
 		rt.nodes = append(rt.nodes, nr)
 	}

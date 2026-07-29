@@ -109,6 +109,9 @@ func TestRuntimeFlagsComeFromTheEnvironment(t *testing.T) {
 		"-domain 0",
 		"-params /opt/conductor/patrol/current/params.yaml",
 		"-params /opt/conductor/patrol/current/params.robot.yaml",
+		// The robot's geometry ships with the release and is named
+		// explicitly, so the unit does not depend on a working directory.
+		"-frames /opt/conductor/patrol/current/frames.json",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("runtime flags %q are missing %q", got, want)
@@ -253,11 +256,14 @@ func TestDeployEndToEnd(t *testing.T) {
 	if m.App != "patrol" || m.Env != "bench" || m.Version != "v1" {
 		t.Errorf("manifest = %+v", m)
 	}
-	if want := []string{"localizer", "navigator", "safety_monitor"}; !equal(m.BringupOrder, want) {
+	if want := []string{"localizer", "patroller", "navigator", "safety_monitor"}; !equal(m.BringupOrder, want) {
 		t.Errorf("bringup order = %v, want %v", m.BringupOrder, want)
 	}
 	if sum, ok := m.Files["bin/patrol"]; !ok || len(sum) != 64 {
 		t.Errorf("manifest has no checksum for the binary: %q", sum)
+	}
+	if _, ok := m.Files["frames.json"]; !ok {
+		t.Errorf("the transform tree did not ship with the release: %v", m.Files)
 	}
 	if !strings.HasPrefix(m.Graph, "sha256:") {
 		t.Errorf("manifest graph fingerprint = %q", m.Graph)

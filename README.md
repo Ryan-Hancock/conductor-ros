@@ -6,8 +6,8 @@ Conductor is an opinionated application framework for robotics, in Go, in the
 spirit of [Encore](https://encore.dev): you declare *what your robot's nodes
 do* in a small amount of typed, declarative code, and the framework derives
 everything ROS 2 makes you hand-maintain — the communication graph, QoS
-configuration, launch files, parameter files, lifecycle wiring, and
-observability.
+configuration, launch files, parameter files, lifecycle wiring, the task
+state machine, the transform tree, and observability.
 
 The core idea: **treat ROS 2 as a runtime, not a framework**, and make the
 application graph a compile-time artifact. The canonical ROS failure — two
@@ -33,7 +33,7 @@ func (n *Navigator) OnPose(p msgs.PoseStamped) {
 
 ```go
 func main() {
-    conductor.Run(&Localizer{}, &Navigator{}, &SafetyMonitor{})
+    conductor.Run(&Localizer{}, &Patroller{}, &Navigator{}, &SafetyMonitor{})
 }
 ```
 
@@ -42,12 +42,14 @@ graph and checks it before anything runs:
 
 ```
 $ conductor check examples/patrol
-app patrol — 3 node(s), 3 topic(s), 2 external interface(s)
+app patrol — 4 node(s), 5 topic(s), 3 external interface(s)
 ...
 topics:
   amcl_pose   geometry_msgs/msg/PoseStamped   localizer -> navigator
   cmd_vel     geometry_msgs/msg/Twist         navigator -> safety_monitor,(external)
-  estop       std_msgs/msg/Bool               (external) -> safety_monitor
+  estop       std_msgs/msg/Bool               (external) -> patroller,safety_monitor
+  goal_pose   geometry_msgs/msg/PoseStamped   patroller -> navigator
+  patrol_status patrol_msgs/msg/PatrolStatus  safety_monitor -> (external)
 
 ✓ graph valid: 0 errors, 0 warning(s)
 ```
@@ -106,6 +108,8 @@ make turtlesim  # the tutorial below, router and turtlesim_node included
 | `conductor.Client[Req,Res]` + `.Call(req)` | Service client (`service:"name"`, optional `timeout:"3s"`) |
 | `conductor.Action[G,F,R]` + `OnField(*Goal[G,F]) (R, error)` | Action server (`action:"name"`); handler runs one goroutine per goal |
 | `conductor.ActionClient[G,F,R]` + `.SendGoal(g)` | Action client (`action:"name"`, optional `timeout:"60s"`) |
+| `conductor.Mission` + `conductor.Step` + `OnField(*Task) error` | Task state machine (`start:`, `next:`, `fail:`, `timeout:`, `retry:`) |
+| `conductor.TF` and `frame:"base_link"` on a Sub/Pub | Declared transform tree (`frames.json`); stamps and checks frame ids |
 | `//ros:type pkg/msg/Name` on a struct | Maps a Go message type to its ROS interface |
 | `conductor.json` | App name + topics provided/consumed by external ROS nodes |
 
@@ -232,6 +236,130 @@ both a conductor server and an rclpy server. See
 [examples/fibonacci](examples/fibonacci/main.go) (server) and
 [examples/mission](examples/mission/main.go) (client).
 
+## Missions: task orchestration as a declaration
+
+A robot's task layer is usually a hand-rolled state machine of booleans and
+timers, or a behaviour tree in an XML file no compiler ever reads. Conductor
+takes the same line it takes with topics — the machine is a declaration:
+
+```go
+//conductor:node
+type Courier struct {
+    Nav  conductor.ActionClient[NavGoal, NavFeedback, NavResult] `action:"navigate_to_pose"`
+    Trip conductor.Mission `start:"pickup"`
+
+    Pickup   conductor.Step `next:"transit"`
+    Transit  conductor.Step `next:"dropoff" fail:"recharge" timeout:"2m" retry:"2"`
+    Dropoff  conductor.Step `next:"done"`
+    Recharge conductor.Step `next:"transit" backoff:"5s"`
+}
+
+func (c *Courier) OnTransit(t *conductor.Task) error {
+    h, err := c.Nav.SendGoal(NavGoal{Pose: c.dropoff})
+    if err != nil {
+        return err                      // fail: → recharge, after 2 retries
+    }
+    if c.battery.Low() {
+        return t.Goto("recharge")       // a branch the tags do not cover
+    }
+    _, _, err = h.Result()
+    return err
+}
+```
+
+- **The machine is checked.** A `next`/`fail` target that is not a step is a
+  build error, and so is a `Goto("recharge")` written with a literal — the
+  scanner reads the transitions in your code as well as the ones in the tags.
+  An unreachable step is a warning. `conductor check` prints the machine and
+  `conductor build` draws it in `gen/mission.dot`.
+- **The runtime drives it.** A mission starts when its node reaches Active
+  and is canceled when it leaves, so `ros2 lifecycle set` stops a task in
+  flight. `timeout` cancels the step's context; `retry`/`backoff` re-run it;
+  `fail` is the recovery branch, and `Task.Err()` tells the recovery step what
+  went wrong.
+- **You get the view for free.** Current step, attempts and step durations are
+  metrics and spans, and the dashboard draws the machine with the live
+  position on it.
+
+Step handlers run on the mission's own goroutine — a step is long-running by
+nature — so like action handlers they must not touch node state that
+callbacks also use. `Task.Do(fn)` runs `fn` on the node's executor for the
+cases that need to; `Task.Sleep` is the interruptible sleep.
+
+`conductor build` draws the machine from the same declarations —
+[examples/mission](examples/mission/main.go), which drives a real ROS 2 action
+server through send → follow → report with a 20s branch that cancels the goal,
+comes out as:
+
+![a generated mission diagram](docs/mission.png)
+
+In tests, `app.AwaitMission("patroller", conductor.MissionDone, time.Second)`
+waits for the machine rather than for a duration, and a step's timing can be a
+parameter — `examples/patrol` runs its route with `dwell` set to 10ms under
+test and 3s on the robot.
+
+## Frames: the transform tree is declared too
+
+Frame ids are magic strings in message headers, and the static transforms
+between them live as positional arguments to `static_transform_publisher` in
+a launch file. Conductor declares the tree in `frames.json`, beside
+`conductor.json`:
+
+```json
+{
+  "static": [
+    {"parent": "base_link", "child": "laser", "xyz": [0.12, 0, 0.19], "rpy": [0, 0, 3.14159]},
+    {"parent": "base_link", "child": "imu",   "xyz": [0, 0, 0.05]}
+  ],
+  "dynamic": [
+    {"parent": "map",  "child": "odom",      "by": "amcl"},
+    {"parent": "odom", "child": "base_link", "by": "ekf"}
+  ]
+}
+```
+
+Static links are ours: the runtime publishes them on `tf_static`, so there is
+no `static_transform_publisher` to launch and nothing to keep in step with the
+code. Dynamic links are someone else's — declaring them is what makes the tree
+whole, so the checker can tell "that frame does not exist" from "that frame
+exists, but only a transform someone publishes at runtime reaches it".
+
+```go
+//conductor:node
+type SafetyMonitor struct {
+    Status conductor.Pub[PatrolStatus] `topic:"patrol_status" frame:"base_link"`
+    Scan   conductor.Sub[LaserScan]    `topic:"scan" frame:"laser"`
+    TF     conductor.TF
+}
+
+func (s *SafetyMonitor) OnConfigure() error {
+    at, err := s.TF.Lookup("base_link", "laser")   // resolved at build time too
+    s.laserAhead = at.Translation[0]
+    return err
+}
+```
+
+- A `frame:` tag **stamps** every message the publisher sends (frame id and
+  timestamp), so the frame is written once, in the declaration.
+- On a subscription it **checks** them: a peer sending another frame is
+  counted and named in the log, once, instead of quietly becoming a wrong
+  transform later.
+- `conductor check` refuses frames that are not in the tree (CND050), trees
+  with two parents, a cycle or two roots (CND051–053), a `Lookup` that cannot
+  be resolved from static links (CND054), a `frame:` on a message with no
+  header (CND057), and warns when two endpoints of one topic declare different
+  frames (CND056).
+- Calibration differs from robot to robot, so an environment may name its own
+  file: `"frames": "frames.robot.json"`. It ships with the release.
+
+Verified against real ROS 2: `ros2 topic echo /tf_static` reads the tree as
+`tf2_msgs/msg/TFMessage`, and `ros2 run tf2_ros tf2_echo base_link laser`
+reports the declared 0.12 m offset and 180° yaw.
+
+> Static transforms are republished at 1 Hz rather than latched, because
+> transient-local durability is not implemented yet (see DESIGN.md); a late
+> joiner therefore sees the tree within a second rather than instantly.
+
 ## Parameters and environments
 
 `Param[T]` values resolve in three layers — the `default` tag, then any
@@ -290,7 +418,7 @@ makes the checker environment-aware:
 
 ```sh
 $ conductor check examples/patrol -env sim
-app patrol [env sim] — 3 node(s), 4 topic(s), 2 external interface(s)
+app patrol [env sim] — 4 node(s), 5 topic(s), 3 external interface(s)
   warning CND021: service "engage_estop": served by safety_monitor but nothing calls it
 ✓ graph valid: 0 errors, 1 warning(s)
 
@@ -327,7 +455,7 @@ generated launch file encodes it, and `Run` follows it at startup:
 
 ```
 bringup order (derived from the graph):
-  localizer -> navigator -> safety_monitor
+  localizer -> patroller -> navigator -> safety_monitor
 ```
 
 Cycles are normal in robotics, so nodes in one are reported and started in
@@ -396,6 +524,10 @@ make dashboard        # or: ./patrol -dashboard :4000 -dashboard-traces 500
   as `localizer/Clock → navigator/amcl_pose → safety_monitor/cmd_vel` with
   the real microsecond offsets. This is the view the trace propagation was
   built for.
+- **The mission machine**, drawn as the declared chain with the running step
+  marked, its attempt count and how long it has been there.
+- **The transform tree**, static links (the ones this process publishes on
+  `tf_static`) separated from the dynamic ones it only expects.
 - **Every metric**, filterable, with per-second rates derived in the page —
   and `/metrics` still served alongside for Prometheus.
 
@@ -581,7 +713,7 @@ Some consequences of knowing the graph statically:
   the process; a zenoh environment gets one unit per node. Getting this
   wrong is invisible until the robot is silent.
 - **Metrics ports are assigned, not collided.** `metrics_addr: ":9090"` with
-  three nodes means `:9090`, `:9091`, `:9092`.
+  four nodes means `:9090` through `:9093`.
 - **Mistakes are refused before the build.** An environment on the zenoh
   transport built without `-tags zenoh` is an error at deploy time, not an
   "unknown transport" exit on the robot.
@@ -621,7 +753,7 @@ $ systemctl --user status patrol.service
 
 ## Status
 
-v1.1 — the static toolchain (scan → validate → generate) works; the runtime
+v1.2 — the static toolchain (scan → validate → generate) works; the runtime
 executes nodes over a pluggable transport: in-process bus by default, or
 Zenoh/rmw_zenoh to join a live ROS 2 graph (see above). CDR serialization is
 pure Go, byte-verified against rclpy; `.msg`/`.srv`/`.action` codegen
@@ -634,17 +766,22 @@ application runs inside `go test` with deterministic timers and no sleeps.
 Environments are declared and the checker is environment-aware, and
 `conductor deploy` cross-compiles, bundles and installs a release — with
 graph-derived systemd units — over ssh, with rollback.
-`.tools/interop.sh` checks every leg against real ROS 2 — 22 of them,
-including the whole turtlesim tutorial. Not yet done: transient-local
-latching, multi-instance node namespacing, task orchestration, and TF
-conventions. See [DESIGN.md](DESIGN.md).
+Task orchestration is declarative — missions are steps and tagged
+transitions, checked by the same toolchain and drawn in `gen/mission.dot` —
+and so is the transform tree: `frames.json` is published on `tf_static`,
+composed by `TF.Lookup`, stamped into headers by a `frame:` tag, and
+validated at build time. `.tools/interop.sh` checks every leg against real
+ROS 2 — 27 of them, including tf2 composing our declared transforms and the
+whole turtlesim tutorial. Not yet done:
+transient-local latching (`tf_static` is republished instead), multi-instance
+node namespacing, and sim-in-CI. See [DESIGN.md](DESIGN.md).
 
 ## Layout
 
-- [conductor (root package)](run.go) — runtime: node wiring, executors, transport registry
+- [conductor (root package)](run.go) — runtime: node wiring, executors, transport registry ([missions](mission.go), [frames](frames.go) and [tf](tf.go))
 - [cmd/conductor](cmd/conductor/main.go) — CLI: `check`, `graph`, `build`, `test`, `deploy`, `msggen`
 - [internal/scan](internal/scan/scan.go) — syntactic scanner for directives and declarations ([environments](internal/scan/environments.go))
-- [internal/graph](internal/graph/graph.go) — topic graph construction + validation rules
+- [internal/graph](internal/graph/graph.go) — topic graph construction + validation rules ([missions](internal/graph/mission.go), [frames](internal/graph/frames.go))
 - [internal/gen](internal/gen/gen.go) — launch/params/dot and [systemd unit](internal/gen/systemd.go) generation
 - [internal/deploy](internal/deploy/deploy.go) — cross-compile, bundle, ship, roll back
 - [cdr](cdr/cdr.go) — pure-Go CDR (XCDR1-LE) codec, golden-tested against rclpy
@@ -652,6 +789,7 @@ conventions. See [DESIGN.md](DESIGN.md).
 - [transport/zenoh](transport/zenoh/zenoh.go) — the cgo Zenoh transport (`-tags zenoh`)
 - [msgs](msgs/msgs.go) — hand-written common ROS message types + registered type hashes
 - [conductortest](conductortest/conductortest.go) — run an application inside `go test`
-- [examples/patrol](examples/patrol/nodes.go) — example application (with [tests](examples/patrol/patrol_test.go))
+- [examples/patrol](examples/patrol/nodes.go) — example application: a mission-driven route, declared [frames](examples/patrol/frames.json), [environments](examples/patrol/environments.json) (with [tests](examples/patrol/patrol_test.go))
 - [examples/chatter](examples/chatter/main.go) — minimal ROS-interop example
+- [examples/mission](examples/mission/main.go) — a declared mission driving a ROS 2 action server
 - [examples/turtlesim](examples/turtlesim/main.go) — the ROS 2 turtlesim tutorial, in conductor

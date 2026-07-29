@@ -431,6 +431,74 @@ service there — a true statement about that environment, reported at build
 time instead of discovered in it. `graph`, `build` and `deploy` take `-env`
 the same way.
 
+## Running it: `conductor run`
+
+Bringing an environment up in development is the same shell in every robotics
+repository — start the router, `sleep 2`, start the simulator, `sleep 4`, run
+the app, `pkill` everything by name — and it is wrong in three ways that
+matter. The sleeps are guesses, so it is flaky on a loaded machine. `pkill -x
+turtlesim_node` kills a colleague's simulator as happily as its own. And
+nothing tears down when the app exits badly.
+
+Everything that shell does by hand is already declared, except one thing:
+`conductor.json` says what is *outside* the application, but not who provides
+it here. That is environment-shaped, so it goes in the environment:
+
+```json
+"sim": {
+  "transport": "zenoh",
+  "endpoint": "tcp/127.0.0.1:7447",
+  "requires": [
+    {"name": "router",    "run": "$CONDUCTOR_OVERLAY/lib/rmw_zenoh_cpp/rmw_zenohd",
+                          "ready": {"endpoint": "tcp/127.0.0.1:7447"}},
+    {"name": "turtlesim", "run": "ros2 run turtlesim turtlesim_node",
+                          "ready": {"command": "ros2 topic list | grep -q /turtle1/pose"}}
+  ]
+}
+```
+
+```sh
+conductor run examples/turtlesim              # the whole tutorial, one command
+conductor run examples/patrol -env sim -- -dashboard :4000
+conductor run . -with "ros2 run turtlesim turtlesim_node"   # ad-hoc, undeclared
+```
+
+```
+conductor: started router (pid 923178)
+conductor: waiting for router (listening on 127.0.0.1:7447)
+conductor: started turtlesim (pid 923183)
+conductor: waiting for turtlesim (ros2 topic list | grep -q /turtle1/pose)
+conductor: running turtlesim [env sim]
+conductor: go run -tags zenoh ./examples/turtlesim -transport zenoh -zenoh-endpoint tcp/127.0.0.1:7447
+…
+conductor: stopped turtlesim
+conductor: stopped router
+```
+
+- **Conditions, not durations.** `ready` is a port to connect to or a command
+  to poll, so bringup takes as long as it takes and no longer. A process that
+  dies before it is ready fails the run *with what it printed*, instead of
+  the app starting into a graph that is not there.
+- **Teardown is by pid, not by name.** Each dependency runs in its own
+  process group and is stopped by group, so a launcher's children go with it
+  and nobody else's simulator is touched. It happens on a clean exit, on a
+  failed one, on Ctrl-C, and — because this gets piped into `head` — on a
+  broken stdout.
+- **The flags come from the environment.** Transport, endpoint, domain,
+  parameter files, calibration, metrics and dashboard addresses: the same set
+  the generated systemd units carry, against the sources rather than an
+  installed release. `conductor check` runs first, because a wiring mistake
+  otherwise shows up as a graph that is quietly silent.
+- **Ctrl-C reaches the application**, so its lifecycle teardown runs and it
+  leaves the ROS graph cleanly rather than being killed where it stands.
+
+The Makefile targets that used to be twelve lines of shell each are now one:
+
+```make
+turtlesim: ; @$(WITHROS) $(CLI) run examples/turtlesim
+mission:   ; @$(WITHROS) $(CLI) run examples/mission
+```
+
 ## Lifecycle and bringup order
 
 Every conductor node is a ROS 2 managed node: it exposes `change_state`,
@@ -927,15 +995,25 @@ ROS 2 — 27 of them, including tf2 composing our declared transforms and the
 whole turtlesim tutorial. A deployment's processes aggregate into one fleet
 view — union graph, findings only the merge can see, and traces stitched
 across processes — and an environment may run on several robots, rolled out
-one at a time behind a health gate. Not yet done:
-transient-local latching (`tf_static` is republished instead), multi-instance
-node namespacing, and sim-in-CI. See [DESIGN.md](DESIGN.md).
+one at a time behind a health gate. `conductor run` brings an environment up
+locally: its declared processes, waited on by condition rather than by sleep,
+and torn down by process group.
+
+Next, in rough order: running split into a process per node locally with the
+dashboard on by default; worked Nav2 and MoveIt examples, with externals
+generated from a live graph instead of hand-listed; `frames.json` derived
+from a URDF; and simulated time behind the same clock abstraction the test
+harness already proves out. Transient-local latching (`tf_static` is
+republished instead) and multi-instance node namespacing remain open. See
+[What comes next](DESIGN.md#what-comes-next-v14-and-beyond) in
+[DESIGN.md](DESIGN.md).
 
 ## Layout
 
 - [conductor (root package)](run.go) — runtime: node wiring, executors, transport registry ([missions](mission.go), [frames](frames.go) and [tf](tf.go))
-- [cmd/conductor](cmd/conductor/main.go) — CLI: `check`, `graph`, `build`, `test`, `deploy`, `msggen`
-- [internal/scan](internal/scan/scan.go) — syntactic scanner for directives and declarations ([environments](internal/scan/environments.go))
+- [cmd/conductor](cmd/conductor/main.go) — CLI: `check`, `graph`, `build`, `run`, `test`, `deploy`, `dashboard`, `msggen`
+- [internal/scan](internal/scan/scan.go) — syntactic scanner for directives and declarations ([environments, robots, requires](internal/scan/environments.go))
+- [internal/run](internal/run/run.go) — `conductor run`: start what the environment needs, run the app, stop it all
 - [internal/graph](internal/graph/graph.go) — topic graph construction + validation rules ([missions](internal/graph/mission.go), [frames](internal/graph/frames.go))
 - [internal/gen](internal/gen/gen.go) — launch/params/dot and [systemd unit](internal/gen/systemd.go) generation
 - [internal/deploy](internal/deploy/deploy.go) — cross-compile, bundle, ship, roll back

@@ -1,0 +1,23 @@
+{
+  "default": "sim",
+  "environments": {
+    "sim": {
+      "transport": "zenoh",
+      "endpoint": "tcp/127.0.0.1:7447",
+      "deploy": {"tags": ["zenoh"], "cgo": true},
+      "requires": [
+        {
+          "name": "router",
+          "run": "$CONDUCTOR_OVERLAY/lib/rmw_zenoh_cpp/rmw_zenohd",
+          "ready": {"endpoint": "tcp/127.0.0.1:7447"}
+        },
+        {
+          "name": "turtlesim",
+          "run": "ros2 run turtlesim turtlesim_node",
+          "ready": {"command": "ros2 topic list | grep -q /turtle1/pose"},
+          "ready_timeout": "30s"
+        }
+      ]
+    }
+  }
+}

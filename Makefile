@@ -80,8 +80,11 @@ verify: fmt vet test-race check ## everything that runs without a live ROS graph
 
 .PHONY: dashboard
 dashboard: ## run examples/patrol with the live dashboard on :4000
-	cd examples/patrol && go run . -dashboard 127.0.0.1:4000 -dashboard-traces 500
+	$(CLI) run examples/patrol -env sim -- -dashboard 127.0.0.1:4000 -dashboard-traces 500
 
+# The fleet demo is still a loop, because it runs the same application four
+# times over: one process per node is what `conductor deploy` generates units
+# for, and what the fleet view aggregates.
 .PHONY: fleet
 fleet: ## (ROS) run examples/patrol as four zenoh processes behind the fleet view (with stitched traces)
 	@$(WITHROS) set -m; \
@@ -104,15 +107,7 @@ gen: ## regenerate launch XML, params, graph/mission/frames dot for examples/pat
 
 .PHONY: mission
 mission: ## (ROS) run the declarative mission example against the Go action server
-	@$(WITHROS) set -m; \
-	  pkill -9 -x rmw_zenohd 2>/dev/null; sleep 1; \
-	  $$CONDUCTOR_OVERLAY/lib/rmw_zenoh_cpp/rmw_zenohd >/dev/null 2>&1 & router=$$!; \
-	  sleep 2; \
-	  go run -tags zenoh ./examples/fibonacci -transport zenoh >/dev/null 2>&1 & server=$$!; \
-	  sleep 2; \
-	  go run -tags zenoh ./examples/mission -transport zenoh; rc=$$?; \
-	  kill -9 $$server $$router 2>/dev/null; \
-	  exit $$rc
+	@$(WITHROS) $(CLI) run examples/mission
 
 .PHONY: clean
 clean: ## remove build output
@@ -148,11 +143,4 @@ interop-%: ## (ROS) one interop group
 
 .PHONY: turtlesim
 turtlesim: ## (ROS) run the turtlesim tutorial: router + turtlesim_node + the example
-	@$(WITHROS) set -m; \
-	  pkill -9 -x turtlesim_node 2>/dev/null; pkill -9 -x rmw_zenohd 2>/dev/null; sleep 1; \
-	  $$CONDUCTOR_OVERLAY/lib/rmw_zenoh_cpp/rmw_zenohd >/dev/null 2>&1 & router=$$!; \
-	  sleep 2; \
-	  ros2 run turtlesim turtlesim_node >/dev/null 2>&1 & sleep 4; \
-	  go run -tags zenoh ./examples/turtlesim -transport zenoh; rc=$$?; \
-	  pkill -9 -x turtlesim_node 2>/dev/null; kill -9 $$router 2>/dev/null; \
-	  exit $$rc
+	@$(WITHROS) $(CLI) run examples/turtlesim

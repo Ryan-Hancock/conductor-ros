@@ -8,6 +8,7 @@
 //	conductor graph [dir]   print the topic graph as Graphviz dot
 //	conductor build [dir]   check, compile the app, and write gen/ artifacts
 //	conductor test [dir]    check the graph, then run the app's Go tests
+//	conductor run [dir]     run the app with everything its environment needs
 //	conductor deploy [dir]  build a release bundle and install it on a target
 //	conductor dashboard     serve the fleet view over a deployment's processes
 package main
@@ -43,6 +44,8 @@ func main() {
 		err = runTest(os.Args[2:])
 	case "deploy":
 		err = runDeploy(os.Args[2:])
+	case "run":
+		err = runRun(os.Args[2:])
 	case "dashboard":
 		err = runDashboard(os.Args[2:])
 	case "msggen":
@@ -65,6 +68,11 @@ func usage() {
                           print the topic graph as Graphviz dot
   conductor build [dir] [-env <name>]
                           check, compile the app, and write gen/ artifacts
+  conductor run [dir] [-env <name>] [-node <name>] [-- app flags]
+                          start what the environment needs, run the
+                          application, and stop everything afterwards
+                            -with "cmd"   also run this for the duration
+                            -v            show the required processes' output
   conductor test [dir] [go test flags...]
                           validate the graph, then run the application's Go
                           tests (see the conductortest package)

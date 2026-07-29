@@ -59,6 +59,13 @@ type Environment struct {
 	Dashboard string `json:"dashboard_addr"`
 	Trace     bool   `json:"trace"`
 
+	// Requires are the processes that must be running for this environment
+	// to work: the zenoh router, a simulator, the drivers a bench stands in
+	// for. conductor.json says what is outside the application; this says
+	// who provides it here, which is the part that differs between a
+	// simulator and a robot.
+	Requires []Process `json:"requires"`
+
 	Deploy *DeployConfig `json:"deploy"`
 
 	// Robots are the machines this environment runs on. One robot (or none
@@ -100,6 +107,48 @@ type Robot struct {
 	Dashboard string   `json:"dashboard_addr"`
 	Prefix    string   `json:"prefix"`
 	Scope     string   `json:"scope"`
+}
+
+// Process is something `conductor run` starts before the application, and
+// stops after it:
+//
+//	"requires": [
+//	  {"name": "router",    "run": "$CONDUCTOR_OVERLAY/lib/rmw_zenoh_cpp/rmw_zenohd",
+//	                        "ready": {"endpoint": "tcp/127.0.0.1:7447"}},
+//	  {"name": "turtlesim", "run": "ros2 run turtlesim turtlesim_node",
+//	                        "ready": {"command": "ros2 topic list | grep -q /turtle1/pose"}}
+//	]
+//
+// Conductor deliberately knows nothing about how ROS is installed: what to
+// run is a command, and whether it is up is a condition. What it does know is
+// that the condition is worth waiting for — a development bringup written in
+// shell says `sleep 4` there, and that is where the flakiness comes from.
+type Process struct {
+	Name string            `json:"name"`
+	Run  string            `json:"run"` // a command line, run through sh
+	Dir  string            `json:"dir"` // working directory, relative to the app
+	Env  map[string]string `json:"env"`
+
+	Ready   Readiness `json:"ready"`
+	Timeout string    `json:"ready_timeout"` // default 30s
+}
+
+// Readiness is how to tell that a required process is up. The kinds are
+// checked in this order, and a process with none declared is simply started.
+type Readiness struct {
+	// Endpoint is a zenoh-style endpoint ("tcp/127.0.0.1:7447") or a plain
+	// host:port; ready means the port accepts a connection.
+	Endpoint string `json:"endpoint"`
+	// Command is polled until it exits 0.
+	Command string `json:"command"`
+	// Delay waits a fixed time — the honest last resort, and the thing every
+	// other kind exists to avoid.
+	Delay string `json:"delay"`
+}
+
+// Declared reports whether any readiness condition was given.
+func (r Readiness) Declared() bool {
+	return r.Endpoint != "" || r.Command != "" || r.Delay != ""
 }
 
 // DeployConfig is where an environment's binary goes and how it is built.

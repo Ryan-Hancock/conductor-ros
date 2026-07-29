@@ -1,0 +1,24 @@
+{
+  "default": "sim",
+  "environments": {
+    "sim": {
+      "transport": "zenoh",
+      "endpoint": "tcp/127.0.0.1:7447",
+      "deploy": {"tags": ["zenoh"], "cgo": true},
+      "requires": [
+        {
+          "name": "router",
+          "run": "$CONDUCTOR_OVERLAY/lib/rmw_zenoh_cpp/rmw_zenohd",
+          "ready": {"endpoint": "tcp/127.0.0.1:7447"}
+        },
+        {
+          "name": "fibonacci",
+          "run": "go run -tags zenoh ./examples/fibonacci -transport zenoh",
+          "dir": "../..",
+          "ready": {"command": "ros2 action list 2>/dev/null | grep -q /fibonacci"},
+          "ready_timeout": "60s"
+        }
+      ]
+    }
+  }
+}

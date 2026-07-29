@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -524,6 +525,23 @@ func serveDashboard(addr string, a *app, transport string, traceDepth int) *http
 	mux.HandleFunc("/api/summary", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, d.summary())
 	})
+	// Raw spans, so a collector can stitch this process's half of a trace to
+	// the half recorded in another. `since` is a cursor, not a filter: it is
+	// what makes polling cost the new spans rather than the whole ring.
+	mux.HandleFunc("/api/spans", func(w http.ResponseWriter, r *http.Request) {
+		res := SpansResponse{Tracing: d.ring != nil, Now: time.Now(), Spans: []SpanRecord{}}
+		if d.ring != nil {
+			since := parseSince(r.URL.Query().Get("since"))
+			limit := 500
+			if v := r.URL.Query().Get("limit"); v != "" {
+				if n, err := strconv.Atoi(v); err == nil && n > 0 {
+					limit = n
+				}
+			}
+			res.Spans = d.ring.records(since, limit)
+		}
+		writeJSON(w, res)
+	})
 	mux.HandleFunc("/api/params", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, "POST a {node, name, value} object", http.StatusMethodNotAllowed)
@@ -597,6 +615,27 @@ func (d *dashboard) transition(node, name string) error {
 		return nil
 	}
 	return fmt.Errorf("no node %q in this process", node)
+}
+
+// parseSince reads the /api/spans cursor. It accepts RFC3339 — what the
+// collector sends — and unix nanoseconds, because a timestamp pasted into a
+// query string by hand loses its "+01:00" to form decoding, and silently
+// replaying the whole ring is a worse answer than accepting both.
+func parseSince(v string) time.Time {
+	if v == "" {
+		return time.Time{}
+	}
+	if t, err := time.Parse(time.RFC3339Nano, v); err == nil {
+		return t
+	}
+	// A '+' that arrived as a space is the offset of a correct timestamp.
+	if t, err := time.Parse(time.RFC3339Nano, strings.Replace(v, " ", "+", 1)); err == nil {
+		return t
+	}
+	if n, err := strconv.ParseInt(v, 10, 64); err == nil && n > 0 {
+		return time.Unix(0, n)
+	}
+	return time.Time{}
 }
 
 func writeJSON(w http.ResponseWriter, v any) {

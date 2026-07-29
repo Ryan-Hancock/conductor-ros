@@ -83,7 +83,7 @@ dashboard: ## run examples/patrol with the live dashboard on :4000
 	cd examples/patrol && go run . -dashboard 127.0.0.1:4000 -dashboard-traces 500
 
 .PHONY: fleet
-fleet: ## (ROS) run examples/patrol as four zenoh processes behind the fleet view
+fleet: ## (ROS) run examples/patrol as four zenoh processes behind the fleet view (with stitched traces)
 	@$(WITHROS) set -m; \
 	  pkill -9 -x patrol 2>/dev/null; pkill -9 -x rmw_zenohd 2>/dev/null; sleep 1; \
 	  go build -tags zenoh -o bin/patrol ./examples/patrol || exit 1; \
@@ -91,11 +91,11 @@ fleet: ## (ROS) run examples/patrol as four zenoh processes behind the fleet vie
 	  sleep 2; \
 	  i=0; for n in localizer patroller navigator safety_monitor; do \
 	    (cd examples/patrol && ../../bin/patrol -transport zenoh -node $$n \
-	      -dashboard 127.0.0.1:$$((4000+i)) >/dev/null 2>&1 &); \
+	      -dashboard 127.0.0.1:$$((4000+i)) -dashboard-traces 300 >/dev/null 2>&1 &); \
 	    i=$$((i+1)); \
 	  done; \
 	  sleep 3; \
-	  $(CLI) dashboard examples/patrol -env robot -host 127.0.0.1; \
+	  $(CLI) dashboard examples/patrol -env robot -host 127.0.0.1 -traces 2000; \
 	  pkill -9 -x patrol 2>/dev/null; kill -9 $$router 2>/dev/null
 
 .PHONY: gen

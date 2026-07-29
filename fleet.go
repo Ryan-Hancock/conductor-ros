@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -55,6 +56,7 @@ type FleetState struct {
 	Frames    []FrameView   `json:"frames"`
 	Findings  []Finding     `json:"findings"`
 	Reachable int           `json:"reachable"`
+	Tracing   bool          `json:"tracing"` // the fleet collector is running
 
 	// framesFrom is the peer whose transform tree the merged one came from,
 	// so a disagreement can name both sides.
@@ -115,6 +117,11 @@ type FleetOptions struct {
 	// driver's topic as unpublished, when the truth is that publishing it
 	// was never ours to do.
 	External map[string]bool
+
+	// Traces is how many spans to keep from across the deployment. Zero
+	// leaves the collector off; the processes must be recording spans too
+	// (-dashboard-traces), since a span per callback is not free.
+	Traces int
 }
 
 // Fleet queries every peer concurrently and merges the answers. A peer that
@@ -404,17 +411,45 @@ func (p *ProcessView) label() string {
 	return p.URL
 }
 
+// FleetServer is the running portal. It is an http.Server plus, when traces
+// are collected, the goroutine that polls for them.
+type FleetServer struct {
+	*http.Server
+	stop  context.CancelFunc
+	done  chan struct{}
+	store *traceStore
+}
+
+// Close stops the collector and the server.
+func (f *FleetServer) Close() error {
+	if f.stop != nil {
+		f.stop()
+		<-f.done
+	}
+	return f.Server.Close()
+}
+
 // ServeFleet starts the fleet portal: it polls the given peers on every
 // request and serves the merged view. It is a plain HTTP client of the
 // per-process dashboards, so it runs anywhere that can reach them — a laptop,
 // or one of the robot's own processes.
-func ServeFleet(addr string, peers []Peer, timeout time.Duration, opts FleetOptions) (*http.Server, error) {
+//
+// With opts.Traces > 0 it also collects spans from every process and stitches
+// them into traces that cross process boundaries. That one needs a background
+// collector rather than a fan-out per request, because a trace is built from
+// what happened between polls, not from what is true right now.
+func ServeFleet(addr string, peers []Peer, timeout time.Duration, opts FleetOptions) (*FleetServer, error) {
 	page, err := fleetFS.ReadFile("fleet.html")
 	if err != nil {
 		return nil, err
 	}
 	if timeout <= 0 {
 		timeout = 2 * time.Second
+	}
+
+	fleet := &FleetServer{}
+	if opts.Traces > 0 {
+		fleet.store = newTraceStore(opts.Traces)
 	}
 
 	mux := http.NewServeMux()
@@ -429,7 +464,17 @@ func ServeFleet(addr string, peers []Peer, timeout time.Duration, opts FleetOpti
 	mux.HandleFunc("/api/fleet", func(w http.ResponseWriter, r *http.Request) {
 		ctx, cancel := context.WithTimeout(r.Context(), timeout+time.Second)
 		defer cancel()
-		writeJSON(w, FleetWith(ctx, peers, timeout, opts))
+		state := FleetWith(ctx, peers, timeout, opts)
+		state.Tracing = fleet.store != nil
+		writeJSON(w, state)
+	})
+	mux.HandleFunc("/api/traces", func(w http.ResponseWriter, r *http.Request) {
+		if fleet.store == nil {
+			writeJSON(w, TracesResponse{Now: time.Now(), Traces: []FleetTrace{},
+				Recording: []string{}, Silent: []string{}, Findings: []Finding{}})
+			return
+		}
+		writeJSON(w, fleet.store.traces(traceLimit(r, 12)))
 	})
 
 	srv := &http.Server{Addr: addr, Handler: mux, ReadHeaderTimeout: 5 * time.Second}
@@ -437,10 +482,64 @@ func ServeFleet(addr string, peers []Peer, timeout time.Duration, opts FleetOpti
 	if err != nil {
 		return nil, err
 	}
+	fleet.Server = srv
+	if fleet.store != nil {
+		ctx, cancel := context.WithCancel(context.Background())
+		fleet.stop, fleet.done = cancel, make(chan struct{})
+		go collectSpans(ctx, fleet.done, fleet.store, peers, timeout, opts.Traces)
+	}
 	go func() {
 		if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
 			slog.Error("conductor: fleet server", "err", err)
 		}
 	}()
-	return srv, nil
+	return fleet, nil
+}
+
+func traceLimit(r *http.Request, def int) int {
+	if v := r.URL.Query().Get("limit"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			return n
+		}
+	}
+	return def
+}
+
+// collectSpans polls every process for the spans it has not reported yet.
+// Failures are silent here: whether a process is answering at all is already
+// reported by the merged state, and a trace view that shouts about a robot
+// being rebooted is a trace view people turn off.
+func collectSpans(ctx context.Context, done chan struct{}, store *traceStore, peers []Peer, timeout time.Duration, capacity int) {
+	defer close(done)
+	client := &http.Client{Timeout: timeout, Transport: &http.Transport{
+		Proxy:               nil,
+		DialContext:         (&net.Dialer{Timeout: timeout}).DialContext,
+		TLSHandshakeTimeout: timeout,
+	}}
+	limit := capacity
+	if limit > 500 {
+		limit = 500
+	}
+
+	tick := time.NewTicker(time.Second)
+	defer tick.Stop()
+	for {
+		var wg sync.WaitGroup
+		for _, p := range peers {
+			wg.Add(1)
+			go func(p Peer) {
+				defer wg.Done()
+				if err := store.collect(ctx, client, p, limit); err != nil {
+					slog.Debug("conductor: span collection", "peer", p.label(), "err", err)
+				}
+			}(p)
+		}
+		wg.Wait()
+
+		select {
+		case <-ctx.Done():
+			return
+		case <-tick.C:
+		}
+	}
 }

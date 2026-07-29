@@ -32,6 +32,7 @@ func runDashboard(args []string) error {
 	fs.Var(&peerList, "peers", "peer dashboard to aggregate as [name=]url (repeatable, or comma-separated)")
 	host := fs.String("host", "", "dial this host instead of the environment's deploy host (an ip, a tunnel, or localhost)")
 	timeout := fs.Duration("timeout", 2*time.Second, "how long to wait for each process")
+	traces := fs.Int("traces", 0, "collect this many recent spans from across the deployment and stitch them into traces (the processes must run with -dashboard-traces)")
 	once := fs.Bool("once", false, "print the merged state as JSON and exit")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -41,6 +42,7 @@ func runDashboard(args []string) error {
 	if err != nil {
 		return err
 	}
+	opts.Traces = *traces
 	if *host != "" {
 		peers, err = rehost(peers, *host)
 		if err != nil {
@@ -65,6 +67,9 @@ func runDashboard(args []string) error {
 		return err
 	}
 	fmt.Printf("conductor fleet view on http://%s/\n", displayAddr(*addr))
+	if *traces > 0 {
+		fmt.Printf("  collecting up to %d spans from across the deployment\n", *traces)
+	}
 	for _, p := range peers {
 		fmt.Printf("  %-16s %s\n", p.Name, p.URL)
 	}

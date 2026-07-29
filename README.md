@@ -583,10 +583,43 @@ state without the metric table and traces), so it runs anywhere that can
 reach the robots: a laptop, or one of the robot's own processes. Nothing new
 goes on the wire.
 
-Still open, in rough order: aggregating traces across processes (the trace
-context already propagates over zenoh, so a callback chain that crosses four
-units is reconstructible — the fleet view just does not stitch it yet); more
-than one robot per environment, which needs the fleet file
+### Traces across processes
+
+The trace context already travels in the message: a callback in one unit
+records itself as the child of the publish that caused it in another. Each
+process therefore holds half of every cross-process trace, and neither half
+is worth much alone — the subscriber's view shows work with no visible cause,
+the publisher's stops at the publish. Give the collector a budget and it
+joins them:
+
+```sh
+# the processes record spans; the fleet view stitches them
+patrol -node navigator -dashboard :4001 -dashboard-traces 300
+conductor dashboard examples/patrol -env robot -traces 2000
+```
+
+![a trace across three processes](docs/trace.png)
+
+That is one timer tick in `localizer`, the subscription it caused in
+`navigator`, and the one *that* caused in `safety_monitor` — three separate
+OS processes over a real zenoh router, with the wire latency visible as the
+gap between the bars (~0.35 ms here). `↳` marks a handover: the span whose
+parent ran somewhere else.
+
+- **Polling is a cursor, not a dump.** Each process serves `/api/spans?since=`
+  and returns only what it has recorded since the last poll, so watching a
+  robot costs the new spans rather than the whole ring.
+- **Clocks are not assumed to agree.** Two machines' clocks differ, and a
+  child that starts before its parent is how that shows up. The chain is
+  ordered causally rather than by timestamp, and the disagreement is reported
+  as `FLEET07` with its size instead of being drawn as time running backwards.
+- **A missing half is marked, not hidden.** A span whose parent has not been
+  collected — the other process is down, or its ring rolled over — is shown
+  as an orphan rather than promoted quietly to a root.
+- Traces that cross a process boundary sort first: those are the ones no
+  single dashboard could have shown.
+
+Still open: more than one robot per environment, which needs the fleet file
 [DESIGN.md](DESIGN.md) open question 6 describes; and authentication, which
 today is "your robots are on your network".
 

@@ -80,6 +80,7 @@ func usage() {
                           serve one page over every process of a deployment,
                           resolving their dashboards from the environment
                             -peers [name=]url,...  aggregate an ad-hoc set
+                            -traces N              stitch traces across processes
                             -once                  print the merged state as JSON
   conductor msggen -out <dir> [-pkg <gopkg>] [-ros-pkg <pkg>] <target...>
                           generate Go message types (with computed RIHS01

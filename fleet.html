@@ -113,6 +113,20 @@ svg { display: block; width: 100%; height: auto; }
 .frame .kind { color: var(--dim); font-size: 11px; white-space: nowrap; }
 .frame.dyn .link { color: var(--dim); }
 .empty { color: var(--dim); font-size: 13px; padding: 4px 0; }
+.trace { border-top: 1px solid var(--line); padding: 8px 0; }
+.trace:first-child { border-top: 0; }
+.trace .hdr { display: flex; gap: 10px; align-items: baseline; font-size: 12px; color: var(--dim); }
+.trace .hdr .crosses { color: var(--accent); font-weight: 600; }
+.span { display: flex; align-items: center; gap: 8px; padding: 1px 0; font-size: 12px; }
+.span .label { font-family: var(--mono); white-space: nowrap; }
+.span .proc { color: var(--dim); font-size: 10.5px; font-family: var(--mono); }
+.span .track { flex: 1; position: relative; height: 9px; background: var(--chip); border-radius: 2px; }
+.span .track > div { position: absolute; top: 0; height: 9px; border-radius: 2px; background: var(--accent); min-width: 2px; }
+.span.kind-timer .track > div { background: var(--warn); }
+.span.kind-service .track > div, .span.kind-action .track > div { background: #7a6fd0; }
+.span.handover .who::before { content: "\21b3 "; color: var(--accent); }
+.span.orphan .who { color: var(--dim); }
+.span .dur { font-family: var(--mono); white-space: nowrap; color: var(--dim); }
 </style>
 </head>
 <body>
@@ -143,6 +157,11 @@ svg { display: block; width: 100%; height: auto; }
   <section id="missionsec" hidden>
     <div class="hdrrow"><h2>missions</h2><span class="chip" id="missionhint"></span></div>
     <div class="body" id="missions"></div>
+  </section>
+
+  <section id="tracesec" hidden>
+    <div class="hdrrow"><h2>traces</h2><span class="chip" id="tracehint"></span></div>
+    <div class="body" id="traces"></div>
   </section>
 
   <section>
@@ -358,6 +377,51 @@ function renderFrames(s) {
   }).join("");
 }
 
+// A trace that crosses processes is the one no per-process dashboard could
+// have drawn: the publisher's span lives in one unit and the subscription it
+// caused in another, joined here by span id.
+async function renderTraces(enabled) {
+  const box = $("tracesec");
+  box.hidden = !enabled;
+  if (!enabled) return;
+  let t;
+  try {
+    t = await (await fetch("/api/traces")).json();
+  } catch (e) {
+    return;
+  }
+  const crossing = t.traces.filter((x) => x.crosses).length;
+  const silent = t.silent.length ? `, ${t.silent.length} not recording` : "";
+  $("tracehint").textContent = `${crossing} crossing processes of ${t.traces.length}${silent}`;
+
+  if (!t.traces.length) {
+    $("traces").innerHTML = t.recording.length
+      ? '<div class="empty">No spans collected yet.</div>'
+      : '<div class="empty">No process is recording spans: run them with '
+        + '<code>-dashboard-traces N</code>.</div>';
+    return;
+  }
+  $("traces").innerHTML = t.traces.map((tr) => {
+    const scale = Math.max(tr.duration_ms, 0.001);
+    const spans = tr.spans.map((sp) => {
+      const left = (sp.offset_ms / scale) * 100, w = Math.max((sp.duration_ms / scale) * 100, 0.6);
+      const cls = ["span", "kind-" + sp.kind, sp.handover ? "handover" : "", sp.orphan ? "orphan" : ""].join(" ");
+      return `<div class="${cls.trim()}">
+        <span class="label who" style="padding-left:${sp.depth * 12}px">${esc(sp.node)}
+          <span class="chip">${esc(sp.name)}</span>
+          <span class="proc">${esc(sp.process || "")}</span></span>
+        <span class="track"><div style="left:${left}%;width:${w}%"></div></span>
+        <span class="dur">${sp.duration_ms.toFixed(2)}ms</span></div>`;
+    }).join("");
+    const across = tr.crosses
+      ? `<span class="crosses">${tr.processes.length} processes</span>` : "";
+    return `<div class="trace"><div class="hdr"><code>${esc(tr.id.slice(0, 16))}…</code>
+      <span>${new Date(tr.start).toLocaleTimeString()}</span>
+      <span>${tr.duration_ms.toFixed(2)}ms</span>
+      <span>${tr.spans.length} spans</span>${across}</div>${spans}</div>`;
+  }).join("");
+}
+
 async function tick() {
   if (paused) return;
   let s;
@@ -383,6 +447,7 @@ async function tick() {
   renderMissions(s);
   renderTopics(s, dt, flows);
   renderFrames(s);
+  await renderTraces(s.tracing);
   prevAt = now;
 }
 tick();

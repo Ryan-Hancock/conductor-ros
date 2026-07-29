@@ -265,11 +265,27 @@ different transform trees (one stale calibration), a unit that is simply
 down. Those are findings on the page rather than something to notice in four
 journals.
 
-Known gaps: traces are not stitched across processes yet, though the trace
-context already crosses the wire, so the data is there; an environment
-targets one host, so a true multi-robot fleet still wants the fleet file open
-question 6 describes; and there is no authentication — the assumption is a
-robot network, not the internet.
+**Traces across processes.** The trace context has crossed the wire since
+v0.8, which means each process already records its half of every distributed
+trace and neither half is legible alone. The collector polls `/api/spans`
+with a cursor — only what each process has recorded since the last poll, so
+watching a robot costs the new spans rather than the ring — and joins parent
+to child by span id, regardless of which process each end came from. What
+comes out is a causal chain across units with the handovers marked, and the
+gap between a publish and the remote callback it caused is the wire latency,
+measured rather than guessed.
+
+Two things the merge refuses to fake. Clocks on separate machines disagree,
+so the chain is ordered by causality, not timestamps; a child that appears to
+start before its parent is reported (FLEET07) with the size of the
+disagreement instead of being drawn as time running backwards. And a span
+whose parent has not been collected is marked as an orphan rather than
+promoted to a root, because "this is the start of the chain" and "the other
+end is missing" are different statements.
+
+Known gaps: an environment targets one host, so a true multi-robot fleet
+still wants the fleet file open question 6 describes; and there is no
+authentication — the assumption is a robot network, not the internet.
 
 ## Missions and frames (v1.2, implemented)
 

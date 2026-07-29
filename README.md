@@ -491,12 +491,50 @@ conductor: stopped router
   otherwise shows up as a graph that is quietly silent.
 - **Ctrl-C reaches the application**, so its lifecycle teardown runs and it
   leaves the ROS graph cleanly rather than being killed where it stands.
+- **The dashboard is served by default**, because a development run should
+  show its work — at the environment's `dashboard_addr` or on loopback — and
+  a browser opens when this looks like a desktop session. `-dashboard off`,
+  `-open no`; a deployed unit still serves one only when asked.
 
-The Makefile targets that used to be twelve lines of shell each are now one:
+### `-split`: the layout the robot has
+
+Locally the in-process bus is the default, so every process boundary that
+exists on the robot is absent on the desk — which is where "works here,
+silent in the field" comes from. `-split` runs what the units run:
+
+```sh
+conductor run examples/patrol -env robot -robot patrol-1 -split
+```
+
+```
+conductor: started router (pid 942278)
+conductor: waiting for router (listening on 127.0.0.1:7447)
+conductor: go build -o /tmp/conductor-patrol-942268 -tags zenoh ./examples/patrol
+conductor: running patrol [env robot, robot patrol-1] as 4 processes
+conductor: fleet view on http://127.0.0.1:4500/
+[navigator] INFO conductor: dashboard available addr=http://:4002/
+[patroller] INFO conductor: mission started node=patroller mission=route step=drive_to
+…
+```
+
+One binary built once and run per node in bringup order, on **the ports the
+deployment would assign** — the same rule `conductor deploy` writes into the
+units, so the fleet view finds them without being told. Each records spans,
+so the aggregated view stitches traces across the four processes: a split run
+is the only place that view has anything to stitch. Output is labelled by
+node, and Ctrl-C stops all of it, the router included.
+
+Splitting an in-process environment is refused, for the reason `conductor
+deploy` makes one unit instead of many: its nodes would be four applications
+that cannot hear each other.
+
+Every Makefile target that used to be a dozen lines of shell is now one:
 
 ```make
 turtlesim: ; @$(WITHROS) $(CLI) run examples/turtlesim
 mission:   ; @$(WITHROS) $(CLI) run examples/mission
+fleet:     ; @$(WITHROS) $(CLI) run examples/patrol -env robot -robot patrol-1 -split
+dashboard: ; $(CLI) run examples/patrol -env sim
 ```
 
 ## Lifecycle and bringup order
@@ -999,8 +1037,10 @@ one at a time behind a health gate. `conductor run` brings an environment up
 locally: its declared processes, waited on by condition rather than by sleep,
 and torn down by process group.
 
-Next, in rough order: running split into a process per node locally with the
-dashboard on by default; worked Nav2 and MoveIt examples, with externals
+`conductor run -split` runs the deployment's process-per-node layout locally,
+with the fleet view over it and the dashboard on by default.
+
+Next, in rough order: worked Nav2 and MoveIt examples, with externals
 generated from a live graph instead of hand-listed; `frames.json` derived
 from a URDF; and simulated time behind the same clock abstraction the test
 harness already proves out. Transient-local latching (`tf_static` is

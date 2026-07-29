@@ -16,7 +16,6 @@ import (
 	"conductor.dev/conductor"
 	"conductor.dev/conductor/internal/deploy"
 	"conductor.dev/conductor/internal/graph"
-	"conductor.dev/conductor/internal/scan"
 )
 
 // runDashboard serves the fleet view: one page over every process of a
@@ -93,7 +92,7 @@ func resolvePeers(dir, env, robot string, explicit []string) ([]conductor.Peer, 
 		return nil, opts, err
 	}
 	if err == nil {
-		opts.External = externalTopics(app)
+		opts.External = app.ExternalTopics()
 	}
 	if len(explicit) > 0 {
 		peers, err := parsePeers(explicit)
@@ -117,18 +116,6 @@ func resolvePeers(dir, env, robot string, explicit []string) ([]conductor.Peer, 
 	}
 	peers, err := deploy.FleetPeers(app, order)
 	return peers, opts, err
-}
-
-// externalTopics is the set of topics an environment expects someone else to
-// publish or consume.
-func externalTopics(app *scan.App) map[string]bool {
-	out := map[string]bool{}
-	for _, e := range app.Externals {
-		if e.Role == "publisher" || e.Role == "subscriber" {
-			out[e.Topic] = true
-		}
-	}
-	return out
 }
 
 // parsePeers reads the -peers form: [name=]url, comma-separated or repeated.

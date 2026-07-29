@@ -28,6 +28,8 @@ import (
 	"syscall"
 	"time"
 
+	"conductor.dev/conductor"
+	"conductor.dev/conductor/internal/graph"
 	"conductor.dev/conductor/internal/scan"
 )
 
@@ -37,25 +39,41 @@ type Options struct {
 	Args    []string // extra flags passed through to the application
 	With    []string // ad-hoc required commands, on top of the environment's
 	Verbose bool     // stream the required processes' output
-	Build   bool     // go build once instead of go run (faster restarts)
 	Out     io.Writer
+
+	// Split runs one process per node, the layout a zenoh deployment has.
+	// Locally the in-process bus hides every process boundary, which is
+	// where "works here, silent on the robot" comes from.
+	Split bool
+
+	// Dashboard is where to serve the development portal: an address, or
+	// "off". Empty means the environment's dashboard_addr, or a default —
+	// unlike a deployed unit, a development run should show its work.
+	Dashboard string
+
+	// Open asks for a browser. Nil means "if this looks like a desktop".
+	Open *bool
 }
 
 // Session is a running environment: the processes started for it, in order.
 type Session struct {
 	opts    Options
 	app     *scan.App
+	graph   *graph.Graph
 	out     io.Writer
 	started []*process
+	nodes   []*process // the per-node processes of a split run
+	binary  string     // built once for a split run
+	fleet   *conductor.FleetServer
 }
 
 // Run starts the environment's required processes, runs the application, and
 // stops everything on the way out. It returns the application's exit error.
-func Run(app *scan.App, o Options) error {
+func Run(app *scan.App, g *graph.Graph, o Options) error {
 	if o.Out == nil {
 		o.Out = os.Stdout
 	}
-	s := &Session{opts: o, app: app, out: o.Out}
+	s := &Session{opts: o, app: app, graph: g, out: o.Out}
 
 	// Hold SIGPIPE for the whole session, not just while the application is
 	// running. Without this, a broken stdout — `conductor run | head` — kills
@@ -71,6 +89,9 @@ func Run(app *scan.App, o Options) error {
 		if err := s.start(p); err != nil {
 			return err
 		}
+	}
+	if o.Split {
+		return s.runSplit()
 	}
 	return s.runApp()
 }
@@ -245,11 +266,25 @@ func (s *Session) runApp() error {
 	if s.opts.Node != "" {
 		flags = append(flags, "-node", s.opts.Node)
 	}
+	// A development run shows its work: unlike a deployed unit, which serves
+	// a dashboard only when asked, `conductor run` serves one unless told
+	// not to. The address is the environment's if it has one.
+	dash := ""
+	if base := s.dashboardBase(); base != "off" && !hasFlag(flags, "-dashboard") {
+		dash = base
+		flags = append(flags, "-dashboard", dash, "-dashboard-traces", "300")
+	}
 	flags = append(flags, s.opts.Args...)
 	args = append(args, flags...)
 
 	fmt.Fprintf(s.out, "conductor: running %s%s\n", s.app.Name, envSuffix(s.app))
-	fmt.Fprintf(s.out, "conductor: go %s\n\n", strings.Join(args, " "))
+	fmt.Fprintf(s.out, "conductor: go %s\n", strings.Join(args, " "))
+	if dash != "" {
+		url := "http://" + displayHost(dash) + "/"
+		fmt.Fprintf(s.out, "conductor: dashboard on %s\n", url)
+		defer s.openWhenUp(url, dash)
+	}
+	fmt.Fprintln(s.out)
 
 	cmd := exec.Command("go", args...)
 	cmd.Dir = s.app.ModuleRoot
@@ -339,6 +374,42 @@ func Flags(app *scan.App) []string {
 	return flags
 }
 
+// hasFlag reports whether a flag was already set, so the caller's wins.
+func hasFlag(flags []string, name string) bool {
+	for _, f := range flags {
+		if f == name {
+			return true
+		}
+	}
+	return false
+}
+
+// displayHost makes ":4000" into something clickable.
+func displayHost(addr string) string {
+	if strings.HasPrefix(addr, ":") {
+		return "localhost" + addr
+	}
+	return addr
+}
+
+// openWhenUp waits for the application to bind its dashboard before handing
+// the URL to a browser — opening it first would show an error page, which is
+// a worse first impression than a second's delay.
+func (s *Session) openWhenUp(url, addr string) {
+	go func() {
+		deadline := time.Now().Add(20 * time.Second)
+		for time.Now().Before(deadline) {
+			conn, err := net.DialTimeout("tcp", dialAddr(displayHost(addr)), 500*time.Millisecond)
+			if err == nil {
+				conn.Close()
+				s.openBrowser(url)
+				return
+			}
+			time.Sleep(250 * time.Millisecond)
+		}
+	}()
+}
+
 func buildTags(app *scan.App) string {
 	if app.Env == nil || app.Env.Deploy == nil {
 		return ""
@@ -361,6 +432,12 @@ func envSuffix(app *scan.App) string {
 // name: it stops the simulator this run started, and not the one somebody
 // else is using.
 func (s *Session) stop() {
+	if s.fleet != nil {
+		s.fleet.Close()
+	}
+	if s.binary != "" {
+		os.Remove(s.binary)
+	}
 	for i := len(s.started) - 1; i >= 0; i-- {
 		p := s.started[i]
 		if p.cmd.Process == nil {

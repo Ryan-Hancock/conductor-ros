@@ -364,6 +364,20 @@ func (a *App) Robots() []*Robot {
 	return a.Env.Robots
 }
 
+// ExternalTopics is the set of topics this application expects someone else
+// to publish or consume. A running process cannot know it — the declaration
+// is static — so it is what a fleet view has to be told before it can tell a
+// driver's topic from one nobody is publishing.
+func (a *App) ExternalTopics() map[string]bool {
+	out := map[string]bool{}
+	for _, e := range a.Externals {
+		if e.Role == "publisher" || e.Role == "subscriber" {
+			out[e.Topic] = true
+		}
+	}
+	return out
+}
+
 // mergeExternals overlays an environment's externals on the base set. An
 // external is identified by topic and role, so an environment can change the
 // type or QoS a peer offers on a topic without repeating the whole list.

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strings"
 
 	"conductor.dev/conductor/internal/run"
 )
@@ -22,6 +23,9 @@ func runRun(args []string) error {
 	env := fs.String("env", "", "environment to run (see environments.json)")
 	robot := fs.String("robot", "", "run as one robot of the environment's fleet")
 	node := fs.String("node", "", "run only this node")
+	split := fs.Bool("split", false, "run one process per node, the layout a zenoh deployment has, with the fleet view over them")
+	dashboard := fs.String("dashboard", "", `serve the dashboard here instead of the environment's address ("off" to serve none)`)
+	open := fs.String("open", "", "open a browser: yes, no (default: when this looks like a desktop session)")
 	verbose := fs.Bool("v", false, "stream the required processes' output as well as the application's")
 	skipCheck := fs.Bool("no-check", false, "skip graph validation")
 	var with stringList
@@ -31,23 +35,31 @@ func runRun(args []string) error {
 	}
 
 	// A wiring mistake otherwise shows up as a graph that is quietly silent,
-	// which is the thing this framework exists not to do.
-	if !*skipCheck {
-		if _, _, err := checkRobot(dir, *env, *robot, false); err != nil {
-			return fmt.Errorf("%w (run with -no-check to start anyway)", err)
+	// which is the thing this framework exists not to do. The graph is also
+	// what a split run needs: its nodes, in bringup order.
+	app, g, err := checkRobot(dir, *env, *robot, false)
+	if err != nil && !*skipCheck {
+		return fmt.Errorf("%w (run with -no-check to start anyway)", err)
+	}
+	if app == nil {
+		if app, err = resolveRobot(dir, *env, *robot); err != nil {
+			return err
 		}
 	}
-	app, err := resolveRobot(dir, *env, *robot)
+
+	wantOpen, err := openPreference(*open)
 	if err != nil {
 		return err
 	}
-
-	err = run.Run(app, run.Options{
-		Node:    *node,
-		Args:    fs.Args(),
-		With:    with,
-		Verbose: *verbose,
-		Out:     os.Stdout,
+	err = run.Run(app, g, run.Options{
+		Node:      *node,
+		Args:      fs.Args(),
+		With:      with,
+		Verbose:   *verbose,
+		Split:     *split,
+		Dashboard: *dashboard,
+		Open:      wantOpen,
+		Out:       os.Stdout,
 	})
 	// The application's exit status is the command's: a mission that aborts
 	// should fail the script that started it.
@@ -55,4 +67,19 @@ func runRun(args []string) error {
 		os.Exit(exit.ExitCode())
 	}
 	return err
+}
+
+// openPreference reads -open, leaving nil for "decide by looking around".
+func openPreference(v string) (*bool, error) {
+	switch strings.ToLower(v) {
+	case "":
+		return nil, nil
+	case "yes", "true", "1":
+		yes := true
+		return &yes, nil
+	case "no", "false", "0":
+		no := false
+		return &no, nil
+	}
+	return nil, fmt.Errorf("-open takes yes or no, not %q", v)
 }

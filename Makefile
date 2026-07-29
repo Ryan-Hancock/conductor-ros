@@ -79,27 +79,12 @@ deploy-dry: ## (ROS) show what deploying examples/patrol to its robot would run
 verify: fmt vet test-race check ## everything that runs without a live ROS graph
 
 .PHONY: dashboard
-dashboard: ## run examples/patrol with the live dashboard on :4000
-	$(CLI) run examples/patrol -env sim -- -dashboard 127.0.0.1:4000 -dashboard-traces 500
+dashboard: ## run examples/patrol with the live dashboard (served by default)
+	$(CLI) run examples/patrol -env sim
 
-# The fleet demo is still a loop, because it runs the same application four
-# times over: one process per node is what `conductor deploy` generates units
-# for, and what the fleet view aggregates.
 .PHONY: fleet
-fleet: ## (ROS) run examples/patrol as four zenoh processes behind the fleet view (with stitched traces)
-	@$(WITHROS) set -m; \
-	  pkill -9 -x patrol 2>/dev/null; pkill -9 -x rmw_zenohd 2>/dev/null; sleep 1; \
-	  go build -tags zenoh -o bin/patrol ./examples/patrol || exit 1; \
-	  $$CONDUCTOR_OVERLAY/lib/rmw_zenoh_cpp/rmw_zenohd >/dev/null 2>&1 & router=$$!; \
-	  sleep 2; \
-	  i=0; for n in localizer patroller navigator safety_monitor; do \
-	    (cd examples/patrol && ../../bin/patrol -transport zenoh -node $$n \
-	      -dashboard 127.0.0.1:$$((4000+i)) -dashboard-traces 300 >/dev/null 2>&1 &); \
-	    i=$$((i+1)); \
-	  done; \
-	  sleep 3; \
-	  $(CLI) dashboard examples/patrol -env robot -host 127.0.0.1 -traces 2000; \
-	  pkill -9 -x patrol 2>/dev/null; kill -9 $$router 2>/dev/null
+fleet: ## (ROS) run examples/patrol as one process per node, behind the fleet view
+	@$(WITHROS) $(CLI) run examples/patrol -env robot -robot patrol-1 -split
 
 .PHONY: gen
 gen: ## regenerate launch XML, params, graph/mission/frames dot for examples/patrol

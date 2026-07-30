@@ -466,6 +466,60 @@ func TestWriteRefusesToFlattenAnEnvironmentOverlay(t *testing.T) {
 	}
 }
 
+// A conductor.Lifecycle field names nodes in other people's processes, so the
+// checker cannot verify them — but a live graph can, and a name that is not
+// there is a stack that will never come up.
+func TestManagedNodesAreCheckedAgainstTheGraph(t *testing.T) {
+	lifecycleOf := func(node string) string {
+		return endpoint(rmwzenoh.EntityService, node, "/"+node+"/change_state",
+			"lifecycle_msgs/srv/ChangeState", "reliable")
+	}
+	g := graphOf(t,
+		node("amcl"), node("bt_navigator"),
+		lifecycleOf("amcl"), lifecycleOf("bt_navigator"),
+	)
+	app := &scan.App{Name: "app", Nodes: []*scan.Node{{
+		Name: "commander",
+		Lifecycle: []scan.LifecycleDecl{{
+			Field: "Stack", Nodes: []string{"amcl", "bt_navigator", "planner_server"},
+		}},
+	}}}
+
+	r := Externals(app, g, Options{})
+	f := findingFor(r, "planner_server")
+	if f.Kind != FindingAbsent {
+		t.Fatalf("planner_server finding = %+v, want absent", f)
+	}
+	if !strings.Contains(f.Message, "change_state") || !strings.Contains(f.Message, "bt_navigator") {
+		t.Errorf("finding neither says what is missing nor what is there: %q", f.Message)
+	}
+	// The two that are there are not complained about.
+	for _, name := range []string{"amcl", "bt_navigator"} {
+		if got := findingFor(r, name); got.Kind != "" {
+			t.Errorf("%s: unexpected %+v", name, got)
+		}
+	}
+}
+
+// A graph with no lifecycle services at all is a stack that is down, which is
+// one fact, not one per declared node.
+func TestManagedNodesOnADownStack(t *testing.T) {
+	app := &scan.App{Name: "app", Nodes: []*scan.Node{{
+		Name: "commander",
+		Lifecycle: []scan.LifecycleDecl{{
+			Field: "Stack", Nodes: []string{"amcl", "bt_navigator", "planner_server"},
+		}},
+	}}}
+
+	r := Externals(app, &Graph{}, Options{})
+	if len(r.Findings) != 1 {
+		t.Fatalf("findings = %+v, want one saying the stack is not running", r.Findings)
+	}
+	if !strings.Contains(r.Findings[0].Message, "not running") {
+		t.Errorf("finding = %q", r.Findings[0].Message)
+	}
+}
+
 func mustParse(t *testing.T, token string) rmwzenoh.Entity {
 	t.Helper()
 	e, err := rmwzenoh.ParseToken(token)

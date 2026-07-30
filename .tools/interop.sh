@@ -280,12 +280,18 @@ if [[ "$GROUP" == all || "$GROUP" == nav2 ]]; then
   # offer? Type names and RIHS01 hashes come from our definitions; ros2 reads
   # them off the graph.
   cat >"$WORK/nav2stub.yaml" <<'YAML'
-nav2:
+bt_navigator:
   ros__parameters:
     fail_every: 2
     speed: 1.5
+controller_server:
+  ros__parameters:
+    speed: 1.5
 YAML
-  bg "$WORK/nav2stub.log" "$BIN/nav2stub" -transport zenoh \
+  # The stand-in starts with its lifecycle manual, which is what
+  # `autostart:=False` does to a real Nav2: its six nodes sit Unconfigured
+  # until something brings them up. That something is the application.
+  bg "$WORK/nav2stub.log" "$BIN/nav2stub" -transport zenoh -lifecycle manual \
     -frames examples/nav2stub/frames.json -params "$WORK/nav2stub.yaml"
   stub_pid="$LAST_PID"
   sleep 4
@@ -296,21 +302,21 @@ YAML
   check "the recovery behaviours advertise their nav2 types" \
     "$WORK/nav2_actions.log" "/spin [nav2_msgs/action/Spin]"
 
-  ros2run 25 service list -t >"$WORK/nav2_services.log" 2>&1
-  check "lifecycle manager advertises nav2_msgs/srv/ManageLifecycleNodes" \
-    "$WORK/nav2_services.log" "manage_nodes [nav2_msgs/srv/ManageLifecycleNodes]"
+  # The stand-in's nodes are managed nodes as far as ROS is concerned, which is
+  # what makes the application's lifecycle client worth having: ros2 lifecycle
+  # is talking to the same protocol conductor serves and now also drives.
+  ros2run 25 lifecycle nodes >"$WORK/nav2_lc_nodes.log" 2>&1
+  check "ros2 lifecycle lists the stack's managed nodes" "$WORK/nav2_lc_nodes.log" "/bt_navigator"
+  check "every server in the declared list is a managed node" "$WORK/nav2_lc_nodes.log" "/behavior_server"
+
+  ros2run 25 lifecycle get /bt_navigator >"$WORK/nav2_lc_before.log" 2>&1
+  check "the stack starts unconfigured, as autostart:=False leaves it" \
+    "$WORK/nav2_lc_before.log" "unconfigured"
 
   # A latched pose is what amcl offers, so it is what the stand-in offers, and
   # ros2 has to agree about the profile or a real subscriber would not match.
   ros2run 25 topic info -v /amcl_pose >"$WORK/nav2_qos.log" 2>&1
   check "amcl_pose is advertised RELIABLE + TRANSIENT_LOCAL" "$WORK/nav2_qos.log" "Durability: TRANSIENT_LOCAL"
-
-  # Nav2 publishes TwistStamped on cmd_vel now (enable_stamped_cmd_vel), in
-  # the costmap's base frame: both are readable by a stock ros2 CLI. The type
-  # is named explicitly so this asserts the type rather than whatever single
-  # publisher happens to be on the topic.
-  ros2run 25 topic echo --once /cmd_vel geometry_msgs/msg/TwistStamped >"$WORK/nav2_cmd.log" 2>&1
-  check "cmd_vel decodes as TwistStamped in base_link" "$WORK/nav2_cmd.log" "frame_id: base_link"
 
   # The declarations are meant to describe the real system, so the strongest
   # check available is to derive them from the running graph and require that
@@ -328,9 +334,34 @@ YAML
   check "the graph supplies nav2's action types, not conductor.json" \
     "$WORK/nav2_externals.log" "nav2_msgs/action/NavigateToPose"
 
-  # Then the application itself against it: lifecycle startup, a waypoint
-  # reached, and a goal aborted into the recovery branch and retried.
-  timeout 60 "$BIN/nav2" -transport zenoh -frames examples/nav2/frames.json >"$WORK/nav2_app.log" 2>&1
+  # Then the application itself against it: it brings six managed nodes up
+  # through the real lifecycle protocol, reaches a waypoint, and takes the
+  # recovery branch when a goal is aborted.
+  bg "$WORK/nav2_app.log" "$BIN/nav2" -transport zenoh -frames examples/nav2/frames.json
+  app_pid="$LAST_PID"
+  sleep 12
+
+  # The claim that matters: a conductor application drove a ROS lifecycle
+  # transition on somebody else's node, and ros2 agrees it happened.
+  ros2run 25 lifecycle get /bt_navigator >"$WORK/nav2_lc_after.log" 2>&1
+  check "the application drove the stack to active" "$WORK/nav2_lc_after.log" "active"
+  ros2run 25 lifecycle get /map_server >"$WORK/nav2_lc_first.log" 2>&1
+  check "the whole declared list came up, not just the node it talks to" \
+    "$WORK/nav2_lc_first.log" "active"
+
+  # Nav2 publishes TwistStamped on cmd_vel now (enable_stamped_cmd_vel), in the
+  # costmap's base frame: both are readable by a stock ros2 CLI. This runs only
+  # now because an inactive managed node publishes nothing — conductor gates
+  # publishers on Active, so before the bringup above there was silence here,
+  # which is the lifecycle working rather than a fault. The type is named
+  # explicitly so this asserts the type rather than whatever is on the topic.
+  ros2run 25 topic echo --once /cmd_vel geometry_msgs/msg/TwistStamped >"$WORK/nav2_cmd.log" 2>&1
+  check "cmd_vel decodes as TwistStamped in base_link" "$WORK/nav2_cmd.log" "frame_id: base_link"
+
+  # Long enough for a goal to be aborted and recovered from: the stand-in fails
+  # every second goal, and a goal takes a couple of seconds at this speed.
+  sleep 18
+  { kill -9 "$app_pid"; wait "$app_pid"; } 2>/dev/null
   check "conductor drives the stack's lifecycle to active" "$WORK/nav2_app.log" "navigation stack active"
   check "conductor action client reaches a waypoint" "$WORK/nav2_app.log" "arrived waypoint=0"
   check "an aborted goal takes the recovery branch" "$WORK/nav2_app.log" "recovering because="

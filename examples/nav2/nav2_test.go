@@ -11,55 +11,54 @@ import (
 	"conductor.dev/conductor/conductortest"
 )
 
-// These tests run the commander's mission against a scripted Nav2: a probe
-// wired into the app under test that serves the same three action servers and
-// the lifecycle manager's service, and answers however the test needs it to.
+// These tests run the commander's mission against a scripted Nav2 — the six
+// managed nodes it declares, wired into the app under test, with the action
+// servers under the test's control.
 //
-// That is the point of driving a stack through declared interfaces rather than
-// a behaviour tree XML. "What does this robot do when navigate_to_pose
-// aborts?" is a question `go test` can answer in ten milliseconds, with no
-// ROS install, no simulator, and no waiting for the fourth waypoint.
+// The managed nodes are real conductor nodes, so the lifecycle the commander
+// drives is the real protocol: they start Unconfigured and only the commander's
+// first mission step brings them up. What is faked is navigation, not ROS.
+//
+// That is the point of driving a stack through declared interfaces rather than a
+// behaviour tree XML. "What does this robot do when navigate_to_pose aborts?" is
+// a question `go test` answers in milliseconds, with no ROS install, no
+// simulator, and no waiting for the fourth waypoint.
 
-// fakeNav2 is Nav2's half of the conversation, under the test's control.
-type fakeNav2 struct {
-	Manage conductor.Svc[ManageLifecycleNodesRequest, ManageLifecycleNodesResponse] `service:"lifecycle_manager_navigation/manage_nodes"`
+// stackNodes are the two Nav2 servers this example actually talks to, plus the
+// four it only manages. Their names are what the commander's nodes tag lists.
+type MapServer struct{}
+type Amcl struct{}
+type ControllerServer struct{}
+type PlannerServer struct{}
 
-	NavTo conductor.Action[NavigateToPoseGoal, NavigateToPoseFeedback, NavigateToPoseResult] `action:"navigate_to_pose"`
-	Back  conductor.Action[BackUpGoal, BackUpFeedback, BackUpResult]                         `action:"backup"`
-	Spin  conductor.Action[SpinGoal, SpinFeedback, SpinResult]                               `action:"spin"`
-
-	// active is what the lifecycle manager reports; a false one is a stack
-	// that will not come up.
-	active bool
-
-	commands   chan uint8              // manage_nodes commands received
+// script is the test's control over what the stack does.
+type script struct {
 	goals      chan NavigateToPoseGoal // navigate_to_pose goals received
 	recoveries chan string             // recovery behaviours run, in order
 	outcomes   chan error              // scripted failures, one per goal
 }
 
-func newFakeNav2(active bool) *fakeNav2 {
-	return &fakeNav2{
-		active:     active,
-		commands:   make(chan uint8, 16),
+func newScript() *script {
+	return &script{
 		goals:      make(chan NavigateToPoseGoal, 16),
 		recoveries: make(chan string, 16),
 		outcomes:   make(chan error, 16),
 	}
 }
 
-func (f *fakeNav2) OnManage(req ManageLifecycleNodesRequest) (ManageLifecycleNodesResponse, error) {
-	f.commands <- req.Command
-	return ManageLifecycleNodesResponse{Success: f.active}, nil
+// BtNavigator serves navigate_to_pose, as Nav2's does.
+type BtNavigator struct {
+	NavTo  conductor.Action[NavigateToPoseGoal, NavigateToPoseFeedback, NavigateToPoseResult] `action:"navigate_to_pose"`
+	script *script
 }
 
-// OnNavTo accepts a goal and completes it, unless the test has queued a
-// failure for it — which Nav2 reports as an aborted goal carrying an error
-// code, not as a transport error.
-func (f *fakeNav2) OnNavTo(g *conductor.Goal[NavigateToPoseGoal, NavigateToPoseFeedback]) (NavigateToPoseResult, error) {
-	f.goals <- g.Value()
+// OnNavTo accepts a goal and completes it, unless the test has queued a failure
+// for it — which Nav2 reports as an aborted goal carrying an error code, not as
+// a transport error.
+func (b *BtNavigator) OnNavTo(g *conductor.Goal[NavigateToPoseGoal, NavigateToPoseFeedback]) (NavigateToPoseResult, error) {
+	b.script.goals <- g.Value()
 	select {
-	case err := <-f.outcomes:
+	case err := <-b.script.outcomes:
 		if err != nil {
 			return NavigateToPoseResult{
 				ErrorCode: NavigateToPose_Result_UNKNOWN,
@@ -71,21 +70,44 @@ func (f *fakeNav2) OnNavTo(g *conductor.Goal[NavigateToPoseGoal, NavigateToPoseF
 	return NavigateToPoseResult{}, nil
 }
 
-func (f *fakeNav2) OnBack(g *conductor.Goal[BackUpGoal, BackUpFeedback]) (BackUpResult, error) {
-	f.recoveries <- "backup"
+// BehaviorServer serves the two recovery behaviours.
+type BehaviorServer struct {
+	Back   conductor.Action[BackUpGoal, BackUpFeedback, BackUpResult] `action:"backup"`
+	Spin   conductor.Action[SpinGoal, SpinFeedback, SpinResult]       `action:"spin"`
+	script *script
+}
+
+func (b *BehaviorServer) OnBack(g *conductor.Goal[BackUpGoal, BackUpFeedback]) (BackUpResult, error) {
+	b.script.recoveries <- "backup"
 	return BackUpResult{}, nil
 }
 
-func (f *fakeNav2) OnSpin(g *conductor.Goal[SpinGoal, SpinFeedback]) (SpinResult, error) {
-	f.recoveries <- "spin"
+func (b *BehaviorServer) OnSpin(g *conductor.Goal[SpinGoal, SpinFeedback]) (SpinResult, error) {
+	b.script.recoveries <- "spin"
 	return SpinResult{}, nil
 }
 
-// runCommander starts the commander with a scripted Nav2 behind it. The
-// lifecycle is manual because the mission starts on Activate, and the stack
-// has to be answering by then — the same ordering problem the mission's first
-// step exists to solve on a real robot.
-func runCommander(t *testing.T, nav *fakeNav2, params map[string]string) (*conductortest.App, *Commander) {
+// stack is every managed node the commander declares, in any order — bringing
+// them up in the declared one is the commander's job.
+func stack(s *script) []any {
+	return []any{
+		&MapServer{}, &Amcl{}, &ControllerServer{}, &PlannerServer{},
+		&BehaviorServer{script: s}, &BtNavigator{script: s},
+	}
+}
+
+// runCommander starts the commander with the stack behind it, nothing brought
+// up. The lifecycle is manual for the same reason `autostart:=False` exists:
+// bringing the stack up is the application's job, and the test wants to watch
+// it happen.
+func runCommander(t *testing.T, s *script, params map[string]string) (*conductortest.App, *Commander) {
+	t.Helper()
+	return runCommanderWith(t, params, stack(s)...)
+}
+
+// runCommanderWith is runCommander over an explicit set of managed nodes, so a
+// test can leave one out and see what the commander does about it.
+func runCommanderWith(t *testing.T, params map[string]string, nodes ...any) (*conductortest.App, *Commander) {
 	t.Helper()
 	tree, err := conductor.LoadFrames("frames.json")
 	if err != nil || tree == nil {
@@ -105,8 +127,7 @@ func runCommander(t *testing.T, nav *fakeNav2, params map[string]string) (*condu
 		ManualLifecycle: true,
 		Frames:          tree,
 		Params:          map[string]map[string]string{"commander": params},
-	}, commander)
-	app.Probe("nav2", nav)
+	}, append([]any{commander}, nodes...)...)
 	return app, commander
 }
 
@@ -144,21 +165,37 @@ func await[T any](t *testing.T, ch <-chan T, what string) T {
 // The stack is brought up before anything is commanded, AMCL is seeded, and
 // the first waypoint of the route goes to navigate_to_pose.
 func TestBringUpThenNavigate(t *testing.T) {
-	nav := newFakeNav2(true)
-	app, commander := runCommander(t, nav, nil)
+	s := newScript()
+	app, commander := runCommander(t, s, nil)
 	estimates := conductortest.Watch[PoseWithCovarianceStamped](app, "initialpose")
 	waypoints := conductortest.Watch[PoseStamped](app, "patrol/waypoint")
 
+	// Every managed node starts Unconfigured: nothing has brought them up.
+	for _, node := range commander.Stack.Nodes() {
+		if got := app.State(node); got != conductor.StateUnconfigured {
+			t.Fatalf("%s starts %s, want unconfigured", node, got)
+		}
+	}
+
 	activate(t, app)
 
-	if cmd := await(t, nav.commands, "a manage_nodes command"); cmd != ManageLifecycleNodes_Request_STARTUP {
-		t.Fatalf("lifecycle command %d, want STARTUP", cmd)
+	// The mission's first step is the lifecycle_manager this replaces.
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if len(commander.Stack.NotActive()) == 0 {
+			break
+		}
+		time.Sleep(2 * time.Millisecond)
 	}
+	if left := commander.Stack.NotActive(); len(left) != 0 {
+		t.Fatalf("%v never reached active", left)
+	}
+
 	// The localize step seeds amcl, and it does so before anything is
 	// commanded: navigating without a pose is how a robot drives into a wall.
 	estimates.Await(t, 2*time.Second)
 
-	goal := await(t, nav.goals, "a navigate_to_pose goal")
+	goal := await(t, s.goals, "a navigate_to_pose goal")
 	want := commander.route[0]
 	if goal.Pose.Pose.Position != want {
 		t.Fatalf("first goal %v, want the first waypoint %v", goal.Pose.Pose.Position, want)
@@ -172,47 +209,60 @@ func TestBringUpThenNavigate(t *testing.T) {
 	}
 }
 
-// Nothing is commanded while the stack is refusing to start, and the retry tag
-// keeps asking rather than giving up on the first no.
-func TestNothingIsCommandedUntilTheStackIsActive(t *testing.T) {
-	nav := newFakeNav2(false)
-	app, _ := runCommander(t, nav, nil)
+// A managed node that is not there stops the whole bringup, and nothing is
+// commanded until it comes back. This is the failure the declared list exists to
+// make legible: one name, reported, instead of a stack that is half up.
+func TestNothingIsCommandedUntilTheStackIsUp(t *testing.T) {
+	s := newScript()
+	// Everything except planner_server, which the commander still manages.
+	app, commander := runCommanderWith(t, nil,
+		&MapServer{}, &Amcl{}, &ControllerServer{},
+		&BehaviorServer{script: s}, &BtNavigator{script: s})
 
 	activate(t, app)
 
-	// bring_up declares retry:"3" backoff:"2s", so a second attempt is proof
-	// the tag is doing the work a retry loop would otherwise do by hand.
-	await(t, nav.commands, "the first startup attempt")
-	await(t, nav.commands, "a retried startup attempt")
+	// bring_up declares retry:"3" backoff:"2s", so waiting past the first
+	// backoff proves the tag is doing the work a retry loop would do by hand.
+	time.Sleep(2500 * time.Millisecond)
 
 	select {
-	case goal := <-nav.goals:
-		t.Fatalf("commanded %v before the navigation stack was active", goal.Pose.Pose.Position)
+	case goal := <-s.goals:
+		t.Fatalf("commanded %v with the stack half up", goal.Pose.Pose.Position)
 	default:
 	}
 	if status, step := app.Mission("commander"); status != conductor.MissionRunning || step != "bring_up" {
 		t.Fatalf("mission %s at %q, want it still running bring_up", status, step)
+	}
+	notActive := commander.Stack.NotActive()
+	var named bool
+	for _, node := range notActive {
+		if node == "planner_server" {
+			named = true
+		}
+	}
+	if !named {
+		t.Errorf("NotActive = %v, want it to name the missing planner_server", notActive)
 	}
 }
 
 // An aborted goal takes the fail: branch, which runs Nav2's own recovery
 // behaviours and then tries the same waypoint again.
 func TestAbortedGoalRunsNav2sRecoveryBehaviours(t *testing.T) {
-	nav := newFakeNav2(true)
-	nav.outcomes <- errors.New("controller could not make progress")
-	app, commander := runCommander(t, nav, nil)
+	s := newScript()
+	s.outcomes <- errors.New("controller could not make progress")
+	app, commander := runCommander(t, s, nil)
 
 	activate(t, app)
 
-	first := await(t, nav.goals, "the first goal")
-	if got := await(t, nav.recoveries, "the backup recovery"); got != "backup" {
+	first := await(t, s.goals, "the first goal")
+	if got := await(t, s.recoveries, "the backup recovery"); got != "backup" {
 		t.Fatalf("first recovery %q, want backup", got)
 	}
-	if got := await(t, nav.recoveries, "the spin recovery"); got != "spin" {
+	if got := await(t, s.recoveries, "the spin recovery"); got != "spin" {
 		t.Fatalf("second recovery %q, want spin", got)
 	}
 
-	retried := await(t, nav.goals, "the retried goal")
+	retried := await(t, s.goals, "the retried goal")
 	if retried.Pose.Pose.Position != first.Pose.Pose.Position {
 		t.Fatalf("after recovering, navigated to %v; want the same waypoint %v",
 			retried.Pose.Pose.Position, first.Pose.Pose.Position)
@@ -226,8 +276,8 @@ func TestAbortedGoalRunsNav2sRecoveryBehaviours(t *testing.T) {
 // rejoins the route where it left off. The Goto that does it is checked
 // statically: `conductor check` resolves "docking" against the declared steps.
 func TestLowBatteryDivertsToTheDock(t *testing.T) {
-	nav := newFakeNav2(true)
-	app, commander := runCommander(t, nav, map[string]string{
+	s := newScript()
+	app, commander := runCommander(t, s, map[string]string{
 		"low_battery":    "0.3",
 		"resume_battery": "0.9",
 	})
@@ -235,12 +285,12 @@ func TestLowBatteryDivertsToTheDock(t *testing.T) {
 	activate(t, app)
 	publishBattery(app, 0.12)
 
-	first := await(t, nav.goals, "the first waypoint")
+	first := await(t, s.goals, "the first waypoint")
 	if first.Pose.Pose.Position != commander.route[0] {
 		t.Fatalf("first goal %v, want the first waypoint", first.Pose.Pose.Position)
 	}
 
-	dock := await(t, nav.goals, "the dock")
+	dock := await(t, s.goals, "the dock")
 	if dock.Pose.Pose.Position != commander.dock {
 		t.Fatalf("diverted to %v, want the dock %v", dock.Pose.Pose.Position, commander.dock)
 	}
@@ -258,7 +308,7 @@ func TestLowBatteryDivertsToTheDock(t *testing.T) {
 	}
 
 	publishBattery(app, 0.95)
-	resumed := await(t, nav.goals, "the route to resume")
+	resumed := await(t, s.goals, "the route to resume")
 	if resumed.Pose.Pose.Position != commander.route[1] {
 		t.Fatalf("resumed at %v, want the next waypoint %v", resumed.Pose.Pose.Position, commander.route[1])
 	}

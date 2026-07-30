@@ -215,6 +215,10 @@ func printReport(app *scan.App, g *graph.Graph, issues []graph.Issue) {
 			}
 			fmt.Printf("    param %s %s = %s\n", p.Name, p.GoType, def)
 		}
+		for _, l := range n.Lifecycle {
+			fmt.Printf("    manage %s (%d node(s), in bringup order)\n",
+				strings.Join(l.Nodes, " -> "), len(l.Nodes))
+		}
 		if n.TF != nil {
 			fmt.Printf("    tf    %s\n", framesSummary(app))
 		}

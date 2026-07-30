@@ -9,3 +9,4 @@ examples/*/gen/
 !.tools/env.sh
 !.tools/interop.sh
 !.tools/pyfib_server.py
+!.tools/fake_battery.py

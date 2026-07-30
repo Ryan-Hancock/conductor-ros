@@ -110,6 +110,7 @@ make turtlesim  # the tutorial below, router and turtlesim_node included
 | `conductor.ActionClient[G,F,R]` + `.SendGoal(g)` | Action client (`action:"name"`, optional `timeout:"60s"`) |
 | `conductor.Mission` + `conductor.Step` + `OnField(*Task) error` | Task state machine (`start:`, `next:`, `fail:`, `timeout:`, `retry:`) |
 | `conductor.TF` and `frame:"base_link"` on a Sub/Pub | Declared transform tree (`frames.json`); stamps and checks frame ids |
+| `conductor.Lifecycle` + `.BringUp(ctx)` | Drive other managed nodes (`nodes:"a,b,c"`, in bringup order) |
 | `//ros:type pkg/msg/Name` on a struct | Maps a Go message type to its ROS interface |
 | `conductor.json` | App name + topics provided/consumed by external ROS nodes |
 
@@ -941,7 +942,7 @@ The whole patrol is a declaration:
 ```go
 //conductor:node
 type Commander struct {
-	Stack conductor.Client[ManageLifecycleNodesRequest, ManageLifecycleNodesResponse] `service:"lifecycle_manager_navigation/manage_nodes" timeout:"120s"`
+	Stack conductor.Lifecycle `nodes:"map_server,amcl,controller_server,planner_server,behavior_server,bt_navigator" timeout:"30s"`
 
 	NavTo   conductor.ActionClient[NavigateToPoseGoal, NavigateToPoseFeedback, NavigateToPoseResult] `action:"navigate_to_pose" timeout:"5m"`
 	Reverse conductor.ActionClient[BackUpGoal, BackUpFeedback, BackUpResult]                         `action:"backup" timeout:"30s"`
@@ -973,11 +974,14 @@ Three things there are worth pointing at, because each replaces something ROS
 leaves to convention:
 
 - **`bring_up` is a step, not a `sleep`.** Nav2's servers are managed nodes;
-  `navigate_to_pose` does not answer until its lifecycle manager has driven
-  them to Active. So the mission's first step asks the manager, and
-  `retry:"3" backoff:"2s"` is the whole of the "it might not be discoverable
-  yet" handling. `conductor run examples/nav2 -env sim` launches
-  `nav2_bringup` with `autostart:=False` for exactly this reason.
+  `navigate_to_pose` does not answer until something has driven them to Active.
+  Nav2 ships a `lifecycle_manager` for that, holding the list in a parameter and
+  started from a launch file; here the list is the `Stack` field above and the
+  mission's first step is `c.Stack.BringUp(t.Context())`. `retry:"3"
+  backoff:"2s"` is the whole of the "it might not be discoverable yet"
+  handling, and `conductor run examples/nav2 -env sim` launches `nav2_bringup`
+  with `autostart:=False` for exactly this reason. See
+  [driving a managed stack](#driving-a-managed-stack-conductorlifecycle).
 - **`fail:"recover"` is Nav2's own recovery, wired in.** An aborted goal
   routes to a step that runs `backup` then `spin` and returns to the same
   waypoint, because the route index is only advanced on arrival. The reason
@@ -1010,11 +1014,15 @@ is meant to remove.
 ### Running it without installing Nav2
 
 [examples/nav2stub](examples/nav2stub/main.go) stands in for a bringup: no
-planner, no costmap, but the same action servers, the same lifecycle service,
-`amcl_pose`, `cmd_vel` and a battery, by the same names and type hashes. It
-refuses goals until the lifecycle manager has started it, and aborts every
+planner, no costmap, but Nav2's *shape* — six managed nodes with Nav2's names,
+carrying the same interfaces on the same nodes, by the same type hashes. It
+runs with `-lifecycle manual`, so those nodes sit Unconfigured exactly as
+`autostart:=False` leaves a real Nav2, and the commander's first mission step is
+what brings them up. It refuses goals until it is Active, and aborts every
 `fail_every`'th goal — a stack that never failed would leave the recovery
-branch untested.
+branch untested. The battery neither it nor the TurtleBot3 simulation has comes
+from [.tools/fake_battery.py](.tools/fake_battery.py), declared as a `requires`
+process of both environments.
 
 ```sh
 make nav2       # router + the stand-in + the application, over zenoh
@@ -1059,6 +1067,56 @@ await(t, nav.recoveries, "the backup recovery")   // "backup", then "spin"
 retried := await(t, nav.goals, "the retried goal")
 // retried is the same waypoint: a failed goal does not advance the route
 ```
+
+### Driving a managed stack: `conductor.Lifecycle`
+
+ROS 2's answer to "bring these nodes up in this order" is a `lifecycle_manager`:
+a node whose whole job is to hold a list of node names and call `change_state`
+on each, configured by a parameter nobody validates and started from a launch
+file. Nav2 ships one. It is the same shape as every other piece of folklore
+this framework replaces — a list, an order, and no way to check either.
+
+So the list is a declaration, and driving it is one call:
+
+```go
+//conductor:node
+type Commander struct {
+    Stack conductor.Lifecycle `nodes:"map_server,amcl,controller_server,bt_navigator" timeout:"30s"`
+}
+
+func (c *Commander) OnBringUp(t *conductor.Task) error {
+    if err := c.Stack.BringUp(t.Context()); err != nil {   // configure all, then activate all
+        return err
+    }
+    return c.Stack.AwaitActive(t.Context(), 10*time.Second)
+}
+```
+
+`conductor check` prints it with the rest of the node:
+
+```
+manage map_server -> amcl -> controller_server -> bt_navigator (4 node(s), in bringup order)
+```
+
+`BringUp` configures every node in declared order and only then activates them
+— which is what Nav2's manager does, and it means a node that cannot configure
+is found before any of its peers starts publishing. Nodes already Active are
+left alone, so a step with `retry:"3"` can re-run it after a partial failure.
+`Deactivate`, `Cleanup` and `Shutdown` run the list in *reverse*, the same rule
+the runtime's own teardown follows, and `NotActive()`/`AwaitActive` answer the
+question a failed bringup actually raises: **which** of them is not up.
+
+This is the third use of machinery the runtime already had — it serves the
+lifecycle protocol for its own nodes, and a fleet rollout already waits for
+Active. What is checked, and where:
+
+- `conductor check` validates the shape of the list (CND060–062: empty, an
+  empty or repeated name, a bad timeout) and warns if you are managing one of
+  *your own* nodes (CND061), whose bringup is already derived from the graph.
+- The names belong to other people's processes, so `conductor check` cannot
+  verify them — but `conductor externals` can, against a live graph: a declared
+  node with no `change_state` service is reported, along with the managed nodes
+  that *are* there.
 
 ## `conductor externals`: ask the graph instead of transcribing it
 
@@ -1231,10 +1289,12 @@ transitions, checked by the same toolchain and drawn in `gen/mission.dot` —
 and so is the transform tree: `frames.json` is published on `tf_static`,
 composed by `TF.Lookup`, stamped into headers by a `frame:` tag, and
 validated at build time. `.tools/interop.sh` checks every leg against real
-ROS 2 — 38 of them, including tf2 composing our declared transforms, the
-whole turtlesim tutorial, Nav2's interfaces being discoverable under their own
-type names from vendored definitions, and an externals block derived from a
-live graph matching the one that is committed. A deployment's processes aggregate into one fleet
+ROS 2 — 42 of them, including tf2 composing our declared transforms, the whole
+turtlesim tutorial, Nav2's interfaces being discoverable under their own type
+names from vendored definitions, an externals block derived from a live graph
+matching the one that is committed, and `ros2 lifecycle get` confirming that a
+conductor application drove somebody else's managed nodes from unconfigured to
+active. A deployment's processes aggregate into one fleet
 view — union graph, findings only the merge can see, and traces stitched
 across processes — and an environment may run on several robots, rolled out
 one at a time behind a health gate. `conductor run` brings an environment up
@@ -1254,12 +1314,14 @@ test`.
 
 `conductor externals` derives that block from a live graph instead — the
 adoption path into a stack that already exists, and the only way to catch a
-declaration that is self-consistent and wrong about the world.
+declaration that is self-consistent and wrong about the world. And
+`conductor.Lifecycle` replaces the `lifecycle_manager` pattern: the managed
+nodes to bring up are a declared, checked list, driven in order from a mission
+step.
 
-Next, in rough order: the same treatment for MoveIt; a first-class lifecycle
-client, so bringing a managed stack up is the graph's ordering rather than one
-service call; `frames.json` derived from a URDF; and simulated time behind the
-same clock abstraction the test harness already proves out. Transient-local latching (`tf_static` is
+Next, in rough order: the same treatment for MoveIt; `frames.json` derived from
+a URDF; and simulated time behind the same clock abstraction the test harness
+already proves out. Transient-local latching (`tf_static` is
 republished instead) and multi-instance node namespacing remain open. See
 [What comes next](DESIGN.md#what-comes-next-v14-and-beyond) in
 [DESIGN.md](DESIGN.md).

@@ -108,11 +108,14 @@ func Externals(app *scan.App, g *Graph, opts Options) *Report {
 		declared[key(e.Topic, e.Role)] = e
 	}
 
+	interfaces := g.Interfaces()
+	r.Findings = append(r.Findings, checkManagedNodes(app, interfaces)...)
+
 	// Walk the graph, deciding for each interface whether this application
 	// needs a declaration for it and what that declaration should say.
 	merged := map[string]scan.External{}
 	seen := map[string]bool{}
-	for _, i := range g.Interfaces() {
+	for _, i := range interfaces {
 		if i.Infrastructure && !opts.Infrastructure {
 			continue
 		}
@@ -213,6 +216,60 @@ func findingOrder(k FindingKind) int {
 	default:
 		return 3
 	}
+}
+
+// checkManagedNodes answers the one question a conductor.Lifecycle field's
+// declaration cannot be checked for at build time: do the managed nodes it
+// names actually exist, and are they managed nodes at all? A name that is not
+// on the graph is a stack that will never come up, reported here rather than
+// as a service call timing out on a robot.
+func checkManagedNodes(app *scan.App, interfaces []Interface) []Finding {
+	managed := map[string]bool{}
+	for _, i := range interfaces {
+		if i.Kind == KindService && strings.HasSuffix(i.Name, "/change_state") {
+			managed[strings.TrimSuffix(i.Name, "/change_state")] = true
+		}
+	}
+	// Nothing on the graph offers a lifecycle at all: that is a graph that is
+	// down, not a set of wrong names, and saying so once beats saying it per
+	// node.
+	if len(managed) == 0 {
+		for _, n := range app.Nodes {
+			for _, decl := range n.Lifecycle {
+				if len(decl.Nodes) > 0 {
+					return []Finding{{FindingAbsent, decl.Nodes[0], "managed",
+						fmt.Sprintf("node %s manages %d node(s), and nothing on the graph offers a "+
+							"lifecycle service at all — the stack it drives is not running",
+							n.Name, len(decl.Nodes))}}
+				}
+			}
+		}
+		return nil
+	}
+
+	var out []Finding
+	for _, n := range app.Nodes {
+		for _, decl := range n.Lifecycle {
+			for _, want := range decl.Nodes {
+				if managed[want] {
+					continue
+				}
+				out = append(out, Finding{FindingAbsent, want, "managed", fmt.Sprintf(
+					"node %s manages %q, but the graph has no %s/change_state; the managed nodes "+
+						"it does offer are %s", n.Name, want, want, strings.Join(sortedKeys(managed), ", "))})
+			}
+		}
+	}
+	return out
+}
+
+func sortedKeys(set map[string]bool) []string {
+	out := make([]string, 0, len(set))
+	for k := range set {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // usage is how this application uses an interface: which side of it we are on.

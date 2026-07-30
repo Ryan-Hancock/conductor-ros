@@ -17,11 +17,6 @@
       "role": "action_server"
     },
     {
-      "topic": "lifecycle_manager_navigation/manage_nodes",
-      "type": "nav2_msgs/srv/ManageLifecycleNodes",
-      "role": "server"
-    },
-    {
       "topic": "initialpose",
       "type": "geometry_msgs/msg/PoseWithCovarianceStamped",
       "role": "subscriber",

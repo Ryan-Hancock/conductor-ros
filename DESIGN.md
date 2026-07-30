@@ -1,6 +1,6 @@
 # Conductor — Design
 
-*Status: v1.5 — static toolchain + pluggable-transport runtime, an
+*Status: v1.6 — static toolchain + pluggable-transport runtime, an
 rmw_zenoh transport verified against live ROS 2 (Lyrical) traffic,
 `.msg`/`.srv`/`.action`-to-Go codegen with local REP-2011 hash computation,
 lifecycle, parameters, observability with a built-in dashboard, an in-process
@@ -8,10 +8,11 @@ test harness, declared environments, single-binary deployment with
 graph-derived systemd units, declarative missions, a declared transform tree,
 a fleet view that merges a deployment's processes — across robots — into
 one graph, a worked Nav2 example that drives a real navigation stack through
-its lifecycle, its recovery behaviours and its actions, and discovery that
+its lifecycle, its recovery behaviours and its actions, discovery that
 derives the externals block from a live graph rather than trusting a hand
-transcription of it. This document records the vision, the architecture, and
-the decisions still open.*
+transcription of it, and a lifecycle client that brings somebody else's managed
+stack up in a declared order. This document records the vision, the
+architecture, and the decisions still open.*
 
 ## Thesis
 
@@ -116,6 +117,9 @@ declarations, so they cannot drift.
 | CND055 | warn  | static transforms declared but no node declares `conductor.TF` |
 | CND056 | warn/error | endpoints of one topic declare different frames (error if nothing connects them) |
 | CND057 | error | `frame:` tag on a message type with no `Header` |
+| CND060 | error | `conductor.Lifecycle` node list is empty, or names one twice, or is not a node name |
+| CND061 | warn  | a lifecycle client manages one of this application's own nodes |
+| CND062 | error | invalid `timeout` on a lifecycle client |
 
 ## The transport decision (RESOLVED: Zenoh-native, shipped in v0.2)
 
@@ -195,10 +199,10 @@ consolidation explicitly, with a comment) are the exact places bugs hide.
 | TF conventions | `static_transform_publisher` in a launch file | `frames.json` published on tf_static, `TF.Lookup` composition, `frame:` tags that stamp and check headers, tree checked at build time | ✅ v1.2 |
 | Driving Nav2 | hand-written action clients, `wait_for_service` loops, a behaviour tree XML for the sequencing, `lifecycle_manager` for the startup | `examples/nav2`: the stack's startup is a mission step, recovery is a `fail:` branch onto Nav2's own behaviours, docking is a checked `Goto`; upstream `nav2_msgs` definitions so the hashes are Nav2's; a stand-in stack so it runs without one | ✅ v1.4 |
 | Externals of someone else's graph | hand-transcribed from source | `conductor externals`: read the liveliness graph, roll actions up, derive the block, and diff it against what is declared (`-check` in CI, `-write` to update) | ✅ v1.5 |
-| Driving MoveIt | as above, plus planning-group magic strings | the same treatment as Nav2; the largest nested messages in common use, so also a CDR/msggen stress test | v1.6 |
-| Bringing a managed stack up | `lifecycle_manager` + `autostart`, ordering in a launch file | a lifecycle *client*: drive transitions and wait for Active in the graph's own order, over the set discovery already found | v1.6 |
-| Robot description | URDF + xacro, constants duplicated into code and launch files | `frames.json` derived from the URDF's fixed joints, `/robot_description` published, SRDF planning groups declared and checked like frames | v1.6 |
-| Simulation | `use_sim_time` folklore, hand-written spawn scripts | the simulator is a declared `requires`; a clock source behind `Timer` and header stamping so sim time is the same code path as wall time | v1.6 |
+| Driving MoveIt | as above, plus planning-group magic strings | the same treatment as Nav2; the largest nested messages in common use, so also a CDR/msggen stress test | v1.7 |
+| Bringing a managed stack up | `lifecycle_manager` + `autostart`, ordering in a launch file | `conductor.Lifecycle`: the list of managed nodes is a declaration, `BringUp` configures then activates it in order, teardown runs it in reverse, and the checker validates the list while `conductor externals` verifies the names against a live graph | ✅ v1.6 |
+| Robot description | URDF + xacro, constants duplicated into code and launch files | `frames.json` derived from the URDF's fixed joints, `/robot_description` published, SRDF planning groups declared and checked like frames | v1.7 |
+| Simulation | `use_sim_time` folklore, hand-written spawn scripts | the simulator is a declared `requires`; a clock source behind `Timer` and header stamping so sim time is the same code path as wall time | v1.7 |
 
 ## Observability (v0.8, implemented)
 
@@ -616,25 +620,70 @@ answers. It is also a snapshot: what is up now, not what the robot has when
 everything is running, which is why `-check` belongs in the interop matrix
 (where the stack is deliberately up) rather than in `conductor check`.
 
-## What comes next (v1.6 and beyond)
+## Driving a managed stack (v1.6, implemented)
+
+ROS 2's managed-node protocol is a spec almost nobody uses directly. What
+people use is a `lifecycle_manager`: a node whose entire job is to hold a list
+of node names and call `change_state` on each in order, configured by a
+parameter nothing validates, started from a launch file with `autostart`. Nav2
+ships one. It is the same shape as every other piece of folklore this project
+has replaced — a list, an order, and no way to check either — and the Nav2
+example met it head on, delegating its whole startup to one `manage_nodes`
+call.
+
+`conductor.Lifecycle` is that list, declared:
+
+	Stack conductor.Lifecycle `nodes:"map_server,amcl,controller_server,bt_navigator" timeout:"30s"`
+
+and `BringUp(ctx)` is what the manager does with it. Three details are the whole
+of the design:
+
+- **Configure everything, then activate everything.** Both passes run in
+  declared order. This is what Nav2's manager does and it is the right shape: a
+  node that cannot configure is found before any of its peers starts
+  publishing. Teardown — `Deactivate`, `Cleanup`, `Shutdown` — runs the list in
+  reverse, the same rule the runtime's own shutdown and the generated systemd
+  ordering already follow.
+- **Idempotent, because a mission step retries.** A node already in the state a
+  pass would reach is left alone, so `retry:"3"` on the step re-runs `BringUp`
+  after a partial failure instead of tripping over the nodes that came up.
+- **The failure is a report, not a timeout.** `AwaitActive` and `NotActive`
+  answer the question a failed bringup actually raises — *which* of them is not
+  up — and a node nobody answers for reports Unknown rather than failing the
+  whole query.
+
+This is the third use of machinery that was already there: the runtime serves
+this protocol for its own nodes, the fleet rollout already waits for Active,
+and now an application drives somebody else's nodes with it. Verified against
+the real thing rather than against itself: `ros2 lifecycle nodes` lists the
+stand-in's six managed nodes, `ros2 lifecycle get /bt_navigator` reports
+`unconfigured [1]` before the application runs and `active [3]` after, and
+`ros2 topic echo /cmd_vel` is silent until the bringup — because conductor gates
+publishers on Active, so an unconfigured stack is properly mute.
+
+What is checked, and where, is the interesting part. The list's *shape* is
+statically checkable and is checked (CND060–062), including a warning for
+managing one of your own nodes, whose bringup is already derived from the graph.
+The *names* are not: they belong to other people's processes. So discovery does
+that half — `conductor externals` knows which nodes on a live graph offer
+`change_state`, and reports a declared managed node that does not, along with
+the ones that do. Neither check is complete alone; together they cover the list.
+
+The example moved with it. `examples/nav2stub` is now six managed nodes with
+Nav2's names, carrying Nav2's interfaces on the nodes that really carry them,
+started with `-lifecycle manual` so they sit Unconfigured exactly as
+`autostart:=False` leaves a real Nav2. That is what makes one declared list
+correct against both the stand-in and a real bringup, which was the point of
+shaping the stand-in this way rather than having it pretend to be one node.
+
+## What comes next (v1.7 and beyond)
 
 The pattern so far is that each milestone took something ROS leaves as
 folklore and made it a declaration the toolchain can read. What follows is
 the same exercise applied to the places a conductor application still meets
 the ecosystem by hand.
 
-### Driving lifecycles directly, and the next big stack
-
-**A lifecycle client.** Nav2's nodes are managed nodes driven by a
-`lifecycle_manager`, and the example drives that manager over its
-`manage_nodes` service — one service call standing in for the ordering
-Conductor already derives. A first-class client (drive a transition, wait for
-Active, report which of a set is not up) could replace the manager with
-something whose order comes from the graph. The runtime already speaks the
-protocol as a server, the fleet rollout already waits for Active, and the
-example is now the third caller of the same machinery. Discovery makes it
-sharper still: `conductor externals` can already see which lifecycle services
-exist and on which nodes, so the set to drive need not be written down either.
+### The next big stack
 
 **A MoveIt example** is the harder one, and useful for a second reason: its
 interfaces (`moveit_msgs/action/MoveGroup`, the planning scene, joint

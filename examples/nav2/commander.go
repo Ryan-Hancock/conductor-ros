@@ -1,10 +1,10 @@
 package main
 
 import (
-	"errors"
 	"fmt"
 	"log/slog"
 	"math"
+	"strings"
 	"time"
 
 	"conductor.dev/conductor"
@@ -24,11 +24,13 @@ import (
 //
 //conductor:node
 type Commander struct {
-	// Nav2's servers are managed nodes: navigate_to_pose does not answer
-	// until the lifecycle manager has driven them through Configure and
-	// Activate. So bringing the stack up is a mission step with a retry
-	// tag, rather than the `sleep 10` that usually stands in for one.
-	Stack conductor.Client[ManageLifecycleNodesRequest, ManageLifecycleNodesResponse] `service:"lifecycle_manager_navigation/manage_nodes" timeout:"120s"`
+	// Nav2's servers are managed nodes: navigate_to_pose does not answer until
+	// something has driven them through Configure and Activate. Nav2 ships a
+	// lifecycle_manager to do it, configured by a parameter nobody checks and
+	// started from a launch file. This is that list, declared — and bringing
+	// the stack up is a mission step with a retry tag rather than the
+	// `sleep 10` that usually stands in for one.
+	Stack conductor.Lifecycle `nodes:"map_server,amcl,controller_server,planner_server,behavior_server,bt_navigator" timeout:"30s"`
 
 	// The action servers this application drives: bt_navigator, and the two
 	// recovery behaviours it falls back on.
@@ -99,19 +101,26 @@ func (c *Commander) OnPose(p PoseWithCovarianceStamped) {
 // OnBattery records the charge the docking branch decides on.
 func (c *Commander) OnBattery(b BatteryState) { c.charge = float64(b.Percentage) }
 
-// OnBringUp asks Nav2's lifecycle manager to start the stack. The retry tag
-// covers the ordinary case of the manager not being discoverable yet: this
-// is a distributed system coming up, and "not yet" is not "broken".
+// OnBringUp configures and activates the navigation stack, in the order the
+// field declares. This is what a lifecycle_manager does; the difference is that
+// the order is a declaration `conductor check` prints, and a node that will not
+// come up is named here rather than in somebody's launch log.
+//
+// The retry tag covers the ordinary case of the stack not being discoverable
+// yet: this is a distributed system coming up, and "not yet" is not "broken".
+// BringUp leaves nodes that are already Active alone, so retrying is safe.
 func (c *Commander) OnBringUp(t *conductor.Task) error {
-	slog.Info("bringing the navigation stack up", "attempt", t.Attempt())
-	res, err := c.Stack.Call(ManageLifecycleNodesRequest{Command: ManageLifecycleNodes_Request_STARTUP})
-	if err != nil {
-		return fmt.Errorf("lifecycle manager: %w", err)
+	slog.Info("bringing the navigation stack up",
+		"nodes", strings.Join(c.Stack.Nodes(), " -> "), "attempt", t.Attempt())
+	if err := c.Stack.BringUp(t.Context()); err != nil {
+		return fmt.Errorf("navigation stack: %w", err)
 	}
-	if !res.Success {
-		return errors.New("lifecycle manager refused to start the stack")
+	// A transition reporting success and a stack being ready are different
+	// claims, so this asks again. The error names whichever nodes are not up.
+	if err := c.Stack.AwaitActive(t.Context(), 10*time.Second); err != nil {
+		return err
 	}
-	slog.Info("navigation stack active")
+	slog.Info("navigation stack active", "nodes", len(c.Stack.Nodes()))
 	return nil
 }
 
@@ -282,11 +291,12 @@ func (c *Commander) OnCharging(t *conductor.Task) error {
 
 // OnGiveUp is the failure exit: park the stack rather than leaving servers
 // active with nobody driving them, and fail the process so whatever started
-// it knows.
+// it knows. Deactivating runs the list in reverse, which is the same rule the
+// runtime's own shutdown follows.
 func (c *Commander) OnGiveUp(t *conductor.Task) error {
-	slog.Error("giving up on the patrol", "err", t.Err())
-	if _, err := c.Stack.Call(ManageLifecycleNodesRequest{Command: ManageLifecycleNodes_Request_PAUSE}); err != nil {
-		slog.Error("could not pause the navigation stack", "err", err)
+	slog.Error("giving up on the patrol", "err", t.Err(), "not_active", c.Stack.NotActive())
+	if err := c.Stack.Deactivate(); err != nil {
+		slog.Error("could not deactivate the navigation stack", "err", err)
 	}
 	conductor.Abort(fmt.Errorf("patrol failed: %w", t.Err()))
 	return nil

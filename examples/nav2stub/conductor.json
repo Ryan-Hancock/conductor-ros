@@ -20,17 +20,6 @@
       "qos": "reliable"
     },
     {
-      "topic": "battery_state",
-      "type": "sensor_msgs/msg/BatteryState",
-      "role": "subscriber",
-      "qos": "sensor"
-    },
-    {
-      "topic": "lifecycle_manager_navigation/manage_nodes",
-      "type": "nav2_msgs/srv/ManageLifecycleNodes",
-      "role": "client"
-    },
-    {
       "topic": "navigate_to_pose",
       "type": "nav2_msgs/action/NavigateToPose",
       "role": "action_client"

@@ -71,6 +71,7 @@ type Node struct {
 	Missions      []Mission // at most one; more than one is a validation error
 	Steps         []Step
 	TF            *TFDecl
+	Lifecycle     []LifecycleDecl // conductor.Lifecycle fields: stacks this node manages
 	// Methods maps method name to its signature shape for handler checks.
 	Methods map[string]MethodSig
 	// Calls are conductor calls made with string literals inside this node's
@@ -116,6 +117,18 @@ type TFDecl struct {
 	Field string
 	File  string
 	Line  int
+}
+
+// LifecycleDecl is a conductor.Lifecycle field: the managed nodes this node
+// drives, in the order it brings them up. The names belong to somebody else's
+// processes, so the checker validates the shape of the list here and
+// `conductor externals` checks the names against a live graph.
+type LifecycleDecl struct {
+	Field   string
+	Nodes   []string
+	Timeout string
+	File    string
+	Line    int
 }
 
 type MethodSig struct {
@@ -467,6 +480,14 @@ func addField(n *Node, pkg string, field *ast.Field, path string, fset *token.Fi
 		})
 	case "TF":
 		n.TF = &TFDecl{Field: fname, File: path, Line: line}
+	case "Lifecycle":
+		n.Lifecycle = append(n.Lifecycle, LifecycleDecl{
+			Field:   fname,
+			Nodes:   splitList(tag.Get("nodes")),
+			Timeout: tag.Get("timeout"),
+			File:    path,
+			Line:    line,
+		})
 	}
 }
 
@@ -503,17 +524,34 @@ func conductorField(e ast.Expr) (kind string, args []string) {
 		case len(x.Indices) == 3 && (sel.Sel.Name == "Action" || sel.Sel.Name == "ActionClient"):
 			return sel.Sel.Name, []string{types.ExprString(x.Indices[0]), types.ExprString(x.Indices[1]), types.ExprString(x.Indices[2])}
 		}
-	case *ast.SelectorExpr: // no type parameters: Timer, Mission, Step, TF
+	case *ast.SelectorExpr: // no type parameters: Timer, Mission, Step, TF, Lifecycle
 		id, ok := x.X.(*ast.Ident)
 		if !ok || id.Name != "conductor" {
 			return "", nil
 		}
 		switch x.Sel.Name {
-		case "Timer", "Mission", "Step", "TF":
+		case "Timer", "Mission", "Step", "TF", "Lifecycle":
 			return x.Sel.Name, []string{""}
 		}
 	}
 	return "", nil
+}
+
+// splitList reads a comma-separated tag value, trimming spaces and any leading
+// slash so that "map_server, /amcl" is the same declaration as
+// "map_server,amcl". Empty entries are kept, because an empty name in the
+// middle of a list is a mistake the checker should report rather than tidy
+// away.
+func splitList(tag string) []string {
+	if strings.TrimSpace(tag) == "" {
+		return nil
+	}
+	parts := strings.Split(tag, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		out = append(out, strings.TrimPrefix(strings.TrimSpace(p), "/"))
+	}
+	return out
 }
 
 // qualify makes a message type reference package-qualified so it matches the

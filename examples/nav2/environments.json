@@ -13,9 +13,15 @@
         },
         {
           "name": "nav2stub",
-          "run": "go run -tags zenoh ../nav2stub -transport zenoh -zenoh-endpoint tcp/127.0.0.1:7447 -dashboard 127.0.0.1:4900",
+          "run": "go run -tags zenoh ../nav2stub -transport zenoh -zenoh-endpoint tcp/127.0.0.1:7447 -lifecycle manual -dashboard 127.0.0.1:4900",
           "ready": {"endpoint": "127.0.0.1:4900"},
           "ready_timeout": "90s"
+        },
+        {
+          "name": "battery",
+          "run": "python3 ../../.tools/fake_battery.py",
+          "ready": {"command": "ros2 topic list | grep -q /battery_state"},
+          "ready_timeout": "60s"
         }
       ]
     },
@@ -33,12 +39,12 @@
           "name": "nav2",
           "run": "ros2 launch nav2_bringup tb3_simulation_launch.py autostart:=False headless:=True",
           "env": {"TURTLEBOT3_MODEL": "waffle"},
-          "ready": {"command": "ros2 service list | grep -q lifecycle_manager_navigation/manage_nodes"},
+          "ready": {"command": "ros2 service list | grep -q bt_navigator/change_state"},
           "ready_timeout": "180s"
         },
         {
           "name": "battery",
-          "run": "ros2 topic pub -r 1 /battery_state sensor_msgs/msg/BatteryState '{percentage: 0.85, present: true}'",
+          "run": "python3 ../../.tools/fake_battery.py",
           "ready": {"command": "ros2 topic list | grep -q /battery_state"},
           "ready_timeout": "60s"
         }

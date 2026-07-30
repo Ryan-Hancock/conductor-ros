@@ -29,6 +29,14 @@ func Query(endpoint string, domain int, timeout time.Duration) (*Graph, error) {
 	}
 	defer session.Close(nil)
 
+	// Open returns before the session has reached the router, and a liveliness
+	// query asked too early is answered by nobody — which reads as an empty
+	// graph rather than as an error, and is exactly the kind of quiet
+	// half-answer this command exists to remove. So wait to be connected.
+	if err := awaitRouter(session, timeout); err != nil {
+		return nil, err
+	}
+
 	// Scoped to the domain, because two domains on one router are two graphs
 	// and merging them would invent peers that cannot hear each other.
 	ke, err := zgo.NewKeyExpr(fmt.Sprintf("%s/%d/**", rmwzenoh.AdminSpace, domain))
@@ -42,7 +50,9 @@ func Query(endpoint string, domain int, timeout time.Duration) (*Graph, error) {
 	}
 
 	g := &Graph{Domain: domain, Endpoint: endpoint}
-	deadline := time.After(timeout + time.Second)
+	// The channel closes when the query finalizes; this is only the backstop
+	// for a router that accepts the query and never answers it.
+	deadline := time.After(timeout + 2*time.Second)
 	for {
 		select {
 		case reply, ok := <-replies:
@@ -64,9 +74,36 @@ func Query(endpoint string, domain int, timeout time.Duration) (*Graph, error) {
 			}
 			g.Entities = append(g.Entities, e)
 		case <-deadline:
-			// The channel closes when the query completes; this is only the
-			// backstop for a router that never answers.
 			return g, nil
 		}
+	}
+}
+
+// awaitRouter waits for the session to be connected to a router (or, on a
+// peer-to-peer graph, to any peer). It reports what it was waiting for when it
+// gives up, because "no router at that endpoint" and "a graph with nothing on
+// it" are different problems with different fixes.
+func awaitRouter(session zgo.Session, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	for {
+		routers, err := session.RoutersZId()
+		if err != nil {
+			return fmt.Errorf("zenoh session: %w", err)
+		}
+		if len(routers) > 0 {
+			return nil
+		}
+		peers, err := session.PeersZId()
+		if err != nil {
+			return fmt.Errorf("zenoh session: %w", err)
+		}
+		if len(peers) > 0 {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("no zenoh router or peer answered within %s "+
+				"(is rmw_zenohd running, and is the endpoint right?)", timeout)
+		}
+		time.Sleep(50 * time.Millisecond)
 	}
 }

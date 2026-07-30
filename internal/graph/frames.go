@@ -62,10 +62,10 @@ func validateFrames(add func(Severity, string, string, string, ...any), app *sca
 		validateLookups(add, app, n)
 	}
 
-	if len(tree.Static()) > 0 && !declaresTF {
+	if len(tree.Published()) > 0 && !declaresTF {
 		add(Warning, "CND055", framesPos(app),
 			"%s declares %d static transform(s) but no node declares a conductor.TF field, so nothing publishes tf_static",
-			app.FramesFile, len(tree.Static()))
+			app.FramesFile, len(tree.Published()))
 	}
 
 	validateFramePairs(add, app)

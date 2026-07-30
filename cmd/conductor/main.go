@@ -12,6 +12,7 @@
 //	conductor deploy [dir]  build a release bundle and install it on a target
 //	conductor dashboard     serve the fleet view over a deployment's processes
 //	conductor externals     derive conductor.json's externals from a live graph
+//	conductor frames        derive frames.json from a robot description (URDF)
 package main
 
 import (
@@ -51,6 +52,8 @@ func main() {
 		err = runDashboard(os.Args[2:])
 	case "externals":
 		err = runExternals(os.Args[2:])
+	case "frames":
+		err = runFrames(os.Args[2:])
 	case "msggen":
 		err = runMsggen(os.Args[2:])
 	default:
@@ -105,6 +108,16 @@ func usage() {
                             -infra     include parameter/lifecycle services
                             -raw       print the graph as discovered
                           (needs the zenoh transport: build with -tags zenoh)
+  conductor frames -from <robot.urdf> [-o frames.json]
+                          derive the transform tree from a robot description:
+                          fixed joints become fixed transforms, movable ones
+                          dynamic
+                            -by <name>  who publishes them (default
+                                        robot_state_publisher)
+                            -publish    claim the fixed joints, so this
+                                        application publishes them itself
+                            -fixed-only leave out movable joints (nothing
+                                        publishes joint state on this robot)
   conductor msggen -out <dir> [-pkg <gopkg>] [-ros-pkg <pkg>] <target...>
                           generate Go message types (with computed RIHS01
                           hashes) from .msg definitions; targets are ROS
@@ -386,7 +399,7 @@ func framesSummary(app *scan.App) string {
 		return "no transform tree declared"
 	}
 	return fmt.Sprintf("%d frame(s), %d static transform(s) published on tf_static",
-		len(app.Frames.Frames()), len(app.Frames.Static()))
+		len(app.Frames.Frames()), len(app.Frames.Published()))
 }
 
 func stepNotes(s graph.MachineStep) string {

@@ -18,7 +18,8 @@ import (
 //
 //	{
 //	  "static": [
-//	    {"parent": "base_link", "child": "laser", "xyz": [0.12, 0, 0.19], "rpy": [0, 0, 3.14159]}
+//	    {"parent": "base_link", "child": "laser", "xyz": [0.12, 0, 0.19], "rpy": [0, 0, 3.14159]},
+//	    {"parent": "base_link", "child": "base_scan", "xyz": [-0.064, 0, 0.122], "by": "robot_state_publisher"}
 //	  ],
 //	  "dynamic": [
 //	    {"parent": "map", "child": "odom", "by": "amcl"},
@@ -26,11 +27,22 @@ import (
 //	  ]
 //	}
 //
-// Static links are ours: the runtime publishes them on tf_static, and
-// TF.Lookup composes them. Dynamic links are someone else's — a localizer, an
-// odometry filter — and declaring them is what makes the tree whole, so the
-// checker can tell "that frame does not exist" from "that frame exists but
-// only a dynamic transform reaches it".
+// Two independent facts are declared here, and keeping them apart is what makes
+// the tree usable on a robot that already has a robot_state_publisher:
+//
+//   - **Does it move?** A static entry's value is fixed and written down, so
+//     TF.Lookup can compose it at build time. A dynamic one is joint state or a
+//     localizer's estimate: only tf knows it, and a lookup across it is an error
+//     the checker reports.
+//   - **Who publishes it?** An entry with no `by` is ours, and the runtime
+//     publishes it on tf_static. An entry with `by` belongs to somebody else —
+//     amcl, an odometry filter, or a robot_state_publisher reading the same
+//     URDF this was derived from — and the runtime leaves it alone.
+//
+// A *static* entry with `by` is therefore the common case on a real robot: the
+// geometry is known (so it can be checked and composed) and it is not ours to
+// publish (so we do not fight the robot_state_publisher for it). Deriving the
+// file with `conductor frames -from robot.urdf` produces exactly that.
 
 // Transform is one link of the frame tree: the pose of Child expressed in
 // Parent. Rotation is roll-pitch-yaw in radians, the same convention as
@@ -41,16 +53,25 @@ type Transform struct {
 	XYZ    [3]float64 `json:"xyz"`
 	RPY    [3]float64 `json:"rpy"`
 
-	// Dynamic links are published at runtime by someone else; By names them,
-	// for the error message that matters when a lookup cannot be resolved
-	// statically.
-	Dynamic bool   `json:"-"`
-	By      string `json:"by,omitempty"`
+	// Dynamic marks a transform whose value is not knowable statically: joint
+	// state, or a localizer's estimate.
+	Dynamic bool `json:"-"`
+
+	// By names whoever publishes it. Empty means this application does, which
+	// is only allowed for a fixed transform — nobody can publish a value they
+	// do not have.
+	By string `json:"by,omitempty"`
 }
 
+// Ours reports whether this application publishes the transform itself.
+func (t Transform) Ours() bool { return !t.Dynamic && t.By == "" }
+
 func (t Transform) String() string {
-	if t.Dynamic {
+	switch {
+	case t.Dynamic:
 		return fmt.Sprintf("%s -> %s (dynamic, by %s)", t.Parent, t.Child, orUnknown(t.By))
+	case t.By != "":
+		return fmt.Sprintf("%s -> %s (fixed, by %s)", t.Parent, t.Child, t.By)
 	}
 	return fmt.Sprintf("%s -> %s", t.Parent, t.Child)
 }
@@ -102,14 +123,30 @@ func LoadFrames(path string) (*FrameTree, error) {
 	return t, nil
 }
 
-// Static returns the transforms this application publishes itself.
-func (t *FrameTree) Static() []Transform {
+// Fixed returns the transforms whose values are known: everything TF.Lookup can
+// compose, whoever publishes it.
+func (t *FrameTree) Fixed() []Transform {
 	if t == nil {
 		return nil
 	}
 	var out []Transform
 	for _, tf := range t.Transforms {
 		if !tf.Dynamic {
+			out = append(out, tf)
+		}
+	}
+	return out
+}
+
+// Published returns the transforms this application publishes on tf_static:
+// fixed, and not attributed to anybody else.
+func (t *FrameTree) Published() []Transform {
+	if t == nil {
+		return nil
+	}
+	var out []Transform
+	for _, tf := range t.Transforms {
+		if tf.Ours() {
 			out = append(out, tf)
 		}
 	}

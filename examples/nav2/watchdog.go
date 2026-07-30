@@ -35,12 +35,21 @@ type Watchdog struct {
 	// knowledge of conductor at all.
 	Report conductor.Pub[DiagnosticArray] `topic:"diagnostics" qos:"reliable"`
 
+	// The robot's own geometry, from the description the stack was launched
+	// with. Nothing here publishes it — robot_state_publisher does — but
+	// frames.json was derived from the same URDF, so its value is known and
+	// TF.Lookup resolves it at build time as well as at runtime.
+	TF conductor.TF
+
 	Beat       conductor.Timer                `rate:"1hz"`
 	StallAfter conductor.Param[time.Duration] `name:"stall_after" default:"5s"`
 	// How close counts as arrived. Without it, a robot parked on its
 	// waypoint — charging, say — looks exactly like a stalled one: a goal
 	// outstanding and no motion.
 	ArrivedWithin conductor.Param[float64] `name:"arrived_within" default:"0.35"`
+
+	lidarAhead float64
+	lidarAbove float64
 
 	target     Point
 	haveTarget bool
@@ -49,6 +58,21 @@ type Watchdog struct {
 	poseAt     time.Time
 	movingAt   time.Time
 	closest    float64
+}
+
+// OnConfigure reads where the lidar is out of the declared tree. `conductor
+// check` resolves this same lookup statically — a description that cannot
+// answer it is a build error rather than a surprise here — and it resolves even
+// though this application publishes none of those transforms.
+func (w *Watchdog) OnConfigure() error {
+	at, err := w.TF.Lookup("base_link", "base_scan")
+	if err != nil {
+		return err
+	}
+	w.lidarAhead, w.lidarAbove = at.Translation[0], at.Translation[2]
+	slog.Info("lidar mounted", "ahead_of_base_link_m", round(w.lidarAhead),
+		"above_base_link_m", round(w.lidarAbove))
+	return nil
 }
 
 // OnWaypoint follows the commander's goal. A new waypoint resets the progress
@@ -103,6 +127,10 @@ func (w *Watchdog) OnBeat() {
 
 	if measured {
 		status.Values = append(status.Values,
+			// The geometry the application believes in, published where an
+			// operator looks when a robot behaves as though its sensor is
+			// somewhere else.
+			KeyValue{Key: "lidar_ahead_of_base_link", Value: fmt.Sprintf("%.3f", w.lidarAhead)},
 			KeyValue{Key: "distance_to_waypoint", Value: fmt.Sprintf("%.2f", distance)},
 			KeyValue{Key: "closest_approach", Value: fmt.Sprintf("%.2f", w.closest)})
 	}

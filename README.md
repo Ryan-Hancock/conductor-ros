@@ -111,6 +111,7 @@ make turtlesim  # the tutorial below, router and turtlesim_node included
 | `conductor.Mission` + `conductor.Step` + `OnField(*Task) error` | Task state machine (`start:`, `next:`, `fail:`, `timeout:`, `retry:`) |
 | `conductor.TF` and `frame:"base_link"` on a Sub/Pub | Declared transform tree (`frames.json`); stamps and checks frame ids |
 | `conductor.Lifecycle` + `.BringUp(ctx)` | Drive other managed nodes (`nodes:"a,b,c"`, in bringup order) |
+| `robot.urdf` | Robot description; `conductor frames -from` derives `frames.json` from it |
 | `//ros:type pkg/msg/Name` on a struct | Maps a Go message type to its ROS interface |
 | `conductor.json` | App name + topics provided/consumed by external ROS nodes |
 
@@ -319,11 +320,23 @@ a launch file. Conductor declares the tree in `frames.json`, beside
 }
 ```
 
-Static links are ours: the runtime publishes them on `tf_static`, so there is
-no `static_transform_publisher` to launch and nothing to keep in step with the
-code. Dynamic links are someone else's — declaring them is what makes the tree
-whole, so the checker can tell "that frame does not exist" from "that frame
-exists, but only a transform someone publishes at runtime reaches it".
+Each entry carries two independent facts, and keeping them apart is what makes
+the tree usable on a robot that already has a `robot_state_publisher`:
+
+- **Does it move?** A `static` entry's value is written down, so `TF.Lookup`
+  composes it at build time. A `dynamic` one is joint state or a localizer's
+  estimate: only tf knows it, and a lookup across it is an error the checker
+  reports. Declaring them anyway is what makes the tree whole, so the checker
+  can tell "that frame does not exist" from "that frame exists, but only a
+  transform someone publishes at runtime reaches it".
+- **Who publishes it?** No `by` means ours, and the runtime publishes it on
+  `tf_static` — no `static_transform_publisher` to launch, nothing to keep in
+  step with the code. A `by` means somebody else's, and the runtime leaves it
+  alone.
+
+A `static` entry *with* `by` is the common case on a real robot: the geometry is
+known, so it can be checked and composed, and it is not ours to publish, so we
+do not fight the `robot_state_publisher` for it.
 
 ```go
 //conductor:node
@@ -352,6 +365,60 @@ func (s *SafetyMonitor) OnConfigure() error {
   frames (CND056).
 - Calibration differs from robot to robot, so an environment may name its own
   file: `"frames": "frames.robot.json"`. It ships with the release.
+
+### Deriving the tree from the robot description
+
+A URDF already says all of this. Its fixed joints *are* the tree's fixed
+transforms; its movable joints are the dynamic ones a `robot_state_publisher`
+provides. Writing both by hand is duplication conductor introduced — and the
+numbers involved (a lidar 64 mm behind `base_link`, 122 mm up) are exactly the
+ones a person transcribes wrongly. So derive them:
+
+```sh
+# A robot with a robot_state_publisher: the geometry is known, not ours to publish.
+conductor frames -from examples/nav2/turtlebot3_waffle.urdf -o examples/nav2/frames.json
+
+# A robot without one: conductor is the only thing that knows the geometry.
+conductor frames -from examples/patrol/patrol.urdf -o examples/patrol/frames.json     -publish -fixed-only
+```
+
+```
+turtlebot3_waffle: 12 joint(s) -> 14 transform(s), 15 frame(s)
+  root: map
+  10 fixed joint(s) attributed to robot_state_publisher: not published by this
+     application, but resolvable by TF.Lookup, because the URDF says what they are
+  2 movable joint(s) are dynamic: their transforms are joint state, so look them
+     up against tf at runtime
+  kept 2 transform(s) already in examples/nav2/frames.json that the description
+     does not mention: map -> odom (dynamic, by amcl); odom -> base_footprint
+     (dynamic, by gazebo (wheel odometry))
+```
+
+Five things it is careful about:
+
+- **A URDF describes the robot, not the world it is in.** `map -> odom` comes
+  from a localizer and `odom -> base_footprint` from odometry; no description
+  mentions either. They are added once by hand and *kept* across re-derivations
+  — the test being whether a joint produces that frame, so a transform *into*
+  the robot's root link survives while the robot's own joints are re-derived.
+- **A movable joint's origin is not its transform.** The URDF's origin for a
+  wheel is where the joint is, not where the wheel is now, so a dynamic entry
+  carries no offset at all rather than one that looks like an answer.
+- **`-publish` is a claim, and it is checked.** Only pass it when nothing else
+  publishes the description; otherwise two publishers put two static transforms
+  on one child. The report says so either way.
+- **`-fixed-only` for a robot with no joint states.** Declaring a wheel frame
+  nothing ever publishes would tell the checker a frame exists that never
+  appears on tf.
+- **xacro is refused, not half-understood.** A `${wheel_separation}` where a
+  number belongs would otherwise parse as zero. The error says to expand it
+  first — which is what `/robot_description` carries on a running robot anyway.
+  (A `${...}` inside an XML comment is a comment: the shipped TurtleBot3
+  description has several, beside the expanded origins that replaced them.)
+
+Both examples derive their trees this way, and a test in each asserts the
+committed `frames.json` is still what its description produces — the same
+drift check `conductor externals -check` performs against a live graph.
 
 Verified against real ROS 2: `ros2 topic echo /tf_static` reads the tree as
 `tf2_msgs/msg/TFMessage`, and `ros2 run tf2_ros tf2_echo base_link laser`
@@ -1271,7 +1338,7 @@ $ systemctl --user status patrol.service
 
 ## Status
 
-v1.5 — the static toolchain (scan → validate → generate) works; the runtime
+v1.7 — the static toolchain (scan → validate → generate) works; the runtime
 executes nodes over a pluggable transport: in-process bus by default, or
 Zenoh/rmw_zenoh to join a live ROS 2 graph (see above). CDR serialization is
 pure Go, byte-verified against rclpy; `.msg`/`.srv`/`.action` codegen
@@ -1317,11 +1384,15 @@ adoption path into a stack that already exists, and the only way to catch a
 declaration that is self-consistent and wrong about the world. And
 `conductor.Lifecycle` replaces the `lifecycle_manager` pattern: the managed
 nodes to bring up are a declared, checked list, driven in order from a mission
-step.
+step. And `frames.json` is no longer transcribed from a URDF but derived from
+one, in either of the two modes a real robot needs — published by conductor, or
+attributed to the `robot_state_publisher` that already owns it and merely
+resolvable here.
 
-Next, in rough order: the same treatment for MoveIt; `frames.json` derived from
-a URDF; and simulated time behind the same clock abstraction the test harness
-already proves out. Transient-local latching (`tf_static` is
+Next, in rough order: the same treatment for MoveIt (with SRDF planning groups
+declared like frames); `/robot_description` published, which needs
+transient-local durability; and simulated time behind the same clock abstraction
+the test harness already proves out. Transient-local latching (`tf_static` is
 republished instead) and multi-instance node namespacing remain open. See
 [What comes next](DESIGN.md#what-comes-next-v14-and-beyond) in
 [DESIGN.md](DESIGN.md).
@@ -1334,6 +1405,7 @@ republished instead) and multi-instance node namespacing remain open. See
 - [internal/run](internal/run/run.go) — `conductor run`: start what the environment needs, run the app, stop it all
 - [internal/graph](internal/graph/graph.go) — topic graph construction + validation rules ([missions](internal/graph/mission.go), [frames](internal/graph/frames.go))
 - [internal/discover](internal/discover/graph.go) — read a live ROS graph; derive and diff [externals](internal/discover/externals.go)
+- [internal/urdf](internal/urdf/urdf.go) — read a robot description; [derive](internal/urdf/frames.go) the transform tree from it
 - [internal/gen](internal/gen/gen.go) — launch/params/dot and [systemd unit](internal/gen/systemd.go) generation
 - [internal/deploy](internal/deploy/deploy.go) — cross-compile, bundle, ship, roll back
 - [cdr](cdr/cdr.go) — pure-Go CDR (XCDR1-LE) codec, golden-tested against rclpy

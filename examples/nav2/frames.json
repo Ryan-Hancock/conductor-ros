@@ -1,10 +1,19 @@
 {
+  "static": [
+    {"parent": "base_footprint", "child": "base_link", "xyz": [0, 0, 0.01], "rpy": [0, 0, 0], "by": "robot_state_publisher"},
+    {"parent": "base_link", "child": "caster_back_right_link", "xyz": [-0.177, -0.064, -0.004], "rpy": [-1.57, 0, 0], "by": "robot_state_publisher"},
+    {"parent": "base_link", "child": "caster_back_left_link", "xyz": [-0.177, 0.064, -0.004], "rpy": [-1.57, 0, 0], "by": "robot_state_publisher"},
+    {"parent": "base_link", "child": "imu_link", "xyz": [0, 0, 0.068], "rpy": [0, 0, 0], "by": "robot_state_publisher"},
+    {"parent": "base_link", "child": "base_scan", "xyz": [-0.064, 0, 0.122], "rpy": [0, 0, 0], "by": "robot_state_publisher"},
+    {"parent": "base_link", "child": "camera_link", "xyz": [0.064, -0.065, 0.094], "rpy": [0, 0, 0], "by": "robot_state_publisher"},
+    {"parent": "camera_link", "child": "camera_rgb_frame", "xyz": [0.005, 0.018, 0.013], "rpy": [0, 0, 0], "by": "robot_state_publisher"},
+    {"parent": "camera_rgb_frame", "child": "camera_rgb_optical_frame", "xyz": [0, 0, 0], "rpy": [-1.57, 0, -1.57], "by": "robot_state_publisher"},
+    {"parent": "camera_link", "child": "camera_depth_frame", "xyz": [0.005, 0.028, 0.013], "rpy": [0, 0, 0], "by": "robot_state_publisher"},
+    {"parent": "camera_depth_frame", "child": "camera_depth_optical_frame", "xyz": [0, 0, 0], "rpy": [-1.57, 0, -1.57], "by": "robot_state_publisher"}
+  ],
   "dynamic": [
     {"parent": "map", "child": "odom", "by": "amcl"},
     {"parent": "odom", "child": "base_footprint", "by": "gazebo (wheel odometry)"},
-    {"parent": "base_footprint", "child": "base_link", "by": "robot_state_publisher"},
-    {"parent": "base_link", "child": "base_scan", "by": "robot_state_publisher"},
-    {"parent": "base_link", "child": "imu_link", "by": "robot_state_publisher"},
     {"parent": "base_link", "child": "wheel_left_link", "by": "robot_state_publisher"},
     {"parent": "base_link", "child": "wheel_right_link", "by": "robot_state_publisher"}
   ]

@@ -1,6 +1,6 @@
 # Conductor — Design
 
-*Status: v1.6 — static toolchain + pluggable-transport runtime, an
+*Status: v1.7 — static toolchain + pluggable-transport runtime, an
 rmw_zenoh transport verified against live ROS 2 (Lyrical) traffic,
 `.msg`/`.srv`/`.action`-to-Go codegen with local REP-2011 hash computation,
 lifecycle, parameters, observability with a built-in dashboard, an in-process
@@ -10,8 +10,9 @@ a fleet view that merges a deployment's processes — across robots — into
 one graph, a worked Nav2 example that drives a real navigation stack through
 its lifecycle, its recovery behaviours and its actions, discovery that
 derives the externals block from a live graph rather than trusting a hand
-transcription of it, and a lifecycle client that brings somebody else's managed
-stack up in a declared order. This document records the vision, the
+transcription of it, a lifecycle client that brings somebody else's managed
+stack up in a declared order, and a transform tree derived from the robot's own
+URDF rather than transcribed beside it. This document records the vision, the
 architecture, and the decisions still open.*
 
 ## Thesis
@@ -201,7 +202,8 @@ consolidation explicitly, with a comment) are the exact places bugs hide.
 | Externals of someone else's graph | hand-transcribed from source | `conductor externals`: read the liveliness graph, roll actions up, derive the block, and diff it against what is declared (`-check` in CI, `-write` to update) | ✅ v1.5 |
 | Driving MoveIt | as above, plus planning-group magic strings | the same treatment as Nav2; the largest nested messages in common use, so also a CDR/msggen stress test | v1.7 |
 | Bringing a managed stack up | `lifecycle_manager` + `autostart`, ordering in a launch file | `conductor.Lifecycle`: the list of managed nodes is a declaration, `BringUp` configures then activates it in order, teardown runs it in reverse, and the checker validates the list while `conductor externals` verifies the names against a live graph | ✅ v1.6 |
-| Robot description | URDF + xacro, constants duplicated into code and launch files | `frames.json` derived from the URDF's fixed joints, `/robot_description` published, SRDF planning groups declared and checked like frames | v1.7 |
+| Robot description | URDF + xacro, constants duplicated into code and launch files | `conductor frames -from robot.urdf`: fixed joints become the tree's fixed transforms, movable ones the dynamic links a robot_state_publisher provides, and the frame checks then apply to the robot's real description | ✅ v1.7 |
+| Robot description, the rest | SRDF planning groups and named poses as magic strings; `/robot_description` read by every tool | SRDF groups declared and checked like frames; `/robot_description` published (needs transient-local) | v1.8 |
 | Simulation | `use_sim_time` folklore, hand-written spawn scripts | the simulator is a declared `requires`; a clock source behind `Timer` and header stamping so sim time is the same code path as wall time | v1.7 |
 
 ## Observability (v0.8, implemented)
@@ -676,7 +678,69 @@ started with `-lifecycle manual` so they sit Unconfigured exactly as
 correct against both the stand-in and a real bringup, which was the point of
 shaping the stand-in this way rather than having it pretend to be one node.
 
-## What comes next (v1.7 and beyond)
+## The robot description (v1.7, implemented)
+
+Every other declaration in Conductor is derived from something. `frames.json`
+was not: it was transcribed from a URDF that already said the same thing, which
+made it the one place where conductor *introduced* duplication rather than
+removing it. And the numbers involved are exactly the ones people get wrong — a
+lidar 64mm behind base_link and 122mm up, in a file nothing cross-checks.
+
+`conductor frames -from robot.urdf` derives the tree: fixed joints become fixed
+transforms carrying the description's offsets, and every other joint type becomes
+a dynamic one. The subset read is links and joints — names, the parent/child
+pair, the type, the origin. Geometry, inertia, materials and gazebo tags
+describe mass and appearance, which conductor has no opinion about.
+
+**The model had to grow a distinction first.** The Nav2 example had recorded it
+as a finding: `dynamic` meant both "somebody else publishes this" and "the value
+is not knowable statically", and a URDF is full of links that are the first
+without being the second — every fixed joint of a robot whose
+robot_state_publisher is already publishing tf_static. So a transform now
+carries both facts, and the tree exposes them separately: `Fixed()` is what
+`TF.Lookup` can compose, `Published()` is what the runtime puts on tf_static.
+A fixed transform attributed to somebody else is resolvable *and* not ours,
+which is what the Nav2 example needed and could not say. Its watchdog now reads
+the lidar's mounting out of a transform robot_state_publisher owns, and
+`conductor check` resolves that lookup at build time.
+
+Four judgements make the derivation trustworthy rather than merely convenient:
+
+- **A URDF describes the robot, not the world it is in.** `map -> odom` is a
+  localizer's and `odom -> base_footprint` an odometry source's; no description
+  mentions either. They are added by hand once and kept across re-derivations,
+  the test being whether a joint *produces* that frame — so a transform into the
+  robot's root link survives while the robot's own joints are re-derived.
+- **A movable joint's origin is not its transform.** The URDF's origin for a
+  wheel is where the joint is, not where the wheel is now, so a dynamic entry
+  carries no offset rather than one that reads as an answer.
+- **Claiming the tree is a claim, and it is reported.** `-publish` makes the
+  fixed joints ours; without a robot_state_publisher that is right, and with one
+  it puts two static transforms on one child. `-fixed-only` leaves out movable
+  joints for a robot with no joint states at all, because declaring a frame
+  nothing publishes tells the checker a frame exists that never appears on tf.
+- **xacro is refused rather than half-understood.** A `${wheel_separation}`
+  where a number belongs would parse as zero. Expansion is xacro's job — a
+  build step or a `requires` process — and the error says so. The detection runs
+  over the document with comments stripped, because xacro does not expand
+  comments and real descriptions are full of commented-out alternatives: the
+  shipped TurtleBot3 waffle keeps three, beside the expanded origins that
+  replaced them.
+
+Both examples now derive their trees, one in each mode: examples/nav2 from the
+real TurtleBot3 waffle description (attributed to robot_state_publisher) and
+examples/patrol from its own (published by the runtime). A test in each asserts
+the committed file is still what its description produces — the same drift check
+`conductor externals -check` performs against a live graph — and the existing
+interop leg still reads patrol's derived geometry back out of tf2, which makes
+the whole path real: URDF, derived tree, tf_static, `tf2_echo`.
+
+Still open, and deliberately: SRDF. Planning groups and named poses are magic
+strings in a MoveIt-driving application, and they want declaring and checking
+exactly as frames now are — but the value of that shows up with the MoveIt
+example, not before it.
+
+## What comes next (v1.8 and beyond)
 
 The pattern so far is that each milestone took something ROS leaves as
 folklore and made it a declaration the toolchain can read. What follows is
@@ -693,28 +757,19 @@ manipulation logic itself — pick, move, place, recover — is a mission, and
 planning group names are magic strings today, which is what the SRDF work
 below would fix.
 
-### The robot description: URDF and SRDF
+### The robot description: what is left
 
-`frames.json` and a URDF say overlapping things. The URDF already describes
-every link and joint; its **fixed joints are exactly the static transforms**
-conductor publishes on tf_static, and its movable joints are exactly the
-dynamic links a robot_state_publisher provides. Declaring them twice is
-duplication conductor introduced, and the fix is to derive: `conductor frames
--from robot.urdf` emitting the tree, with movable joints marked dynamic and
-attributed to whoever publishes them. Then the frame checks (CND050–057)
-apply to the robot's real description rather than to a file beside it.
+The transform tree is derived from the URDF (above). Two related pieces are not.
 
-Two related pieces follow. Tools find a robot's model on
-**`/robot_description`**, a transient-local topic — which is a second
-dependent for the latching gap below, and an argument for closing it. And
-**SRDF** names planning groups, named poses and disabled collision pairs; a
+Tools find a robot's model on **`/robot_description`**, a transient-local topic
+— which is a second dependent for the latching gap below, and an argument for
+closing it. Publishing the description conductor already parses would make a
+conductor-only robot legible to rviz and to anything else that expects it.
+
+And **SRDF** names planning groups, named poses and disabled collision pairs; a
 MoveIt-driving application refers to those by string today, and they could be
-declared and checked exactly as frames are.
-
-The cost to be honest about: URDF is XML with a macro language (xacro) layered
-on top, and xacro is Python. Conductor should read plain URDF — a small,
-well-specified subset for links and joints — and leave xacro expansion to a
-`requires` step or a build command, rather than pretending to reimplement it.
+declared and checked exactly as frames now are. That work belongs with the MoveIt
+example, which is what would give it a reason to exist.
 
 ### Simulation and time
 

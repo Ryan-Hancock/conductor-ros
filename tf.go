@@ -61,7 +61,10 @@ func (f *TF) Tree() *FrameTree { return f.tree }
 
 func (f *TF) bind(rt *runtimeState, nr *nodeRuntime, field reflect.StructField, ownerPtr reflect.Value) error {
 	f.tree, f.node = rt.frames, nr
-	statics := rt.frames.Static()
+	// Only what this application owns: a fixed transform attributed to somebody
+	// else is theirs to publish, and publishing it too would put two static
+	// transforms with the same child on tf_static.
+	statics := rt.frames.Published()
 	rt.recordEndpoint(Endpoint{
 		Node: nr.name, Kind: EndpointTF, Field: field.Name, Name: tfStaticTopic,
 		Type: "tf2_msgs/msg/TFMessage", Rate: describeFrames(rt.frames),
@@ -105,7 +108,8 @@ func describeFrames(t *FrameTree) string {
 	if t == nil {
 		return ""
 	}
-	return fmt.Sprintf("%d static, %d dynamic", len(t.Static()), len(t.Transforms)-len(t.Static()))
+	return fmt.Sprintf("%d published, %d fixed, %d dynamic",
+		len(t.Published()), len(t.Fixed()), len(t.Transforms)-len(t.Fixed()))
 }
 
 // --- frame stamping and checking -------------------------------------------

@@ -165,20 +165,30 @@ func machineUses(m graph.Machine, step string) bool {
 	return false
 }
 
-// FramesDot renders the declared transform tree: static links solid (this
-// application publishes them), dynamic links dashed and labelled with whoever
-// does.
+// FramesDot renders the declared transform tree. The two facts a transform
+// carries are drawn separately, because they are separate questions: a solid
+// edge is a value that is known (so it carries the offset), a dashed one is not;
+// a black edge is ours to publish, a grey one is somebody else's, labelled with
+// who.
 func FramesDot(g *graph.Graph) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "// %s\ndigraph %q {\n  rankdir=LR;\n  node [fontname=\"Helvetica\", shape=box];\n",
 		header, g.App.Name+" frames")
 	for _, tf := range g.Frames.Transforms {
 		if tf.Dynamic {
-			fmt.Fprintf(&b, "  %q -> %q [style=dashed, label=%q, fontsize=9];\n", tf.Parent, tf.Child, byOrExternal(tf.By))
+			fmt.Fprintf(&b, "  %q -> %q [style=dashed, color=grey40, fontcolor=grey40, label=%q, fontsize=9];\n",
+				tf.Parent, tf.Child, byOrExternal(tf.By))
 			continue
 		}
 		label := fmt.Sprintf("%.3g %.3g %.3g", tf.XYZ[0], tf.XYZ[1], tf.XYZ[2])
-		fmt.Fprintf(&b, "  %q -> %q [label=%q, fontsize=9];\n", tf.Parent, tf.Child, label)
+		if tf.Ours() {
+			fmt.Fprintf(&b, "  %q -> %q [label=%q, fontsize=9];\n", tf.Parent, tf.Child, label)
+			continue
+		}
+		// Fixed, and somebody else's to publish: known well enough to compose,
+		// not ours to put on tf_static.
+		fmt.Fprintf(&b, "  %q -> %q [color=grey40, fontcolor=grey40, label=%q, fontsize=9];\n",
+			tf.Parent, tf.Child, label+"\n"+tf.By)
 	}
 	b.WriteString("}\n")
 	return b.String()

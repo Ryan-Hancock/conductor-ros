@@ -7,6 +7,7 @@ import (
 
 	"conductor.dev/conductor"
 	"conductor.dev/conductor/conductortest"
+	"conductor.dev/conductor/internal/urdf"
 	"conductor.dev/conductor/msgs"
 	"conductor.dev/conductor/srvs"
 )
@@ -255,5 +256,63 @@ func TestPatrolRouteIsAMission(t *testing.T) {
 	app.Transition("patroller", conductor.TransitionDeactivate)
 	if status, _ := app.Mission("patroller"); status != conductor.MissionCanceled {
 		t.Fatalf("mission %s after deactivate, want canceled", status)
+	}
+}
+
+// frames.json is derived from patrol.urdf, so it can drift from the robot it
+// describes — the same way conductor.json could drift from a live graph before
+// `conductor externals -check`. This is that check, for the description:
+//
+//	conductor frames -from examples/patrol/patrol.urdf \
+//	    -o examples/patrol/frames.json -publish -fixed-only
+//
+// The world links (map -> odom, odom -> base_link) are not in any URDF and are
+// preserved by the derivation, so they are compared separately.
+func TestCommittedFramesMatchTheDescription(t *testing.T) {
+	robot, err := urdf.Load("patrol.urdf")
+	if err != nil {
+		t.Fatal(err)
+	}
+	derived, _ := urdf.Frames(robot, urdf.Options{Ours: true, FixedOnly: true})
+
+	committed, err := conductor.LoadFrames("frames.json")
+	if err != nil || committed == nil {
+		t.Fatalf("loading frames.json: %v", err)
+	}
+
+	// Everything the description produces must match exactly: this robot has no
+	// robot_state_publisher, so conductor publishes its geometry, and these are
+	// the numbers that go on tf_static.
+	want := map[string]conductor.Transform{}
+	for _, tf := range derived.Transforms {
+		want[tf.Child] = tf
+	}
+	got := map[string]conductor.Transform{}
+	for _, tf := range committed.Transforms {
+		if _, fromURDF := want[tf.Child]; fromURDF {
+			got[tf.Child] = tf
+		}
+	}
+	if len(got) != len(want) {
+		t.Fatalf("frames.json has %d of the description's %d transforms; re-derive it",
+			len(got), len(want))
+	}
+	for child, w := range want {
+		if got[child] != w {
+			t.Errorf("%s: frames.json says %+v, patrol.urdf says %+v; re-derive it", child, got[child], w)
+		}
+	}
+
+	// And the world links survive, because nothing in a URDF describes them.
+	for _, child := range []string{"odom", "base_link"} {
+		var found bool
+		for _, tf := range committed.Transforms {
+			if tf.Child == child && tf.Dynamic {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("frames.json lost the dynamic transform into %q", child)
+		}
 	}
 }

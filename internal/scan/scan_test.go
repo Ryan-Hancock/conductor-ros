@@ -121,7 +121,7 @@ func TestScanMissionsAndFrames(t *testing.T) {
 	if app.Frames == nil || app.FramesFile != "frames.json" {
 		t.Fatalf("frames = %+v, file %q", app.Frames, app.FramesFile)
 	}
-	if len(app.Frames.Static()) != 1 || len(app.Frames.Transforms) != 3 {
+	if len(app.Frames.Fixed()) != 1 || len(app.Frames.Transforms) != 3 {
 		t.Errorf("frames = %+v", app.Frames.Transforms)
 	}
 	if !app.Stamped["main.Cloud"] || app.Stamped["main.Reading"] {

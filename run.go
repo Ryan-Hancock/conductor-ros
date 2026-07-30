@@ -94,7 +94,8 @@ func Run(nodes ...any) {
 	}
 	if frames != nil {
 		slog.Info("conductor: loaded transforms", "file", framesPath,
-			"static", len(frames.Static()), "frames", len(frames.Frames()))
+			"published", len(frames.Published()), "fixed", len(frames.Fixed()),
+			"frames", len(frames.Frames()))
 	}
 
 	if *traceLog {

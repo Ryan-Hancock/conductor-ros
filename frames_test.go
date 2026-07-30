@@ -42,8 +42,11 @@ const robotFrames = `{
 
 func TestFramesLoadAndDescribe(t *testing.T) {
 	tree := loadTree(t, robotFrames)
-	if got, want := len(tree.Static()), 2; got != want {
-		t.Fatalf("%d static transforms, want %d", got, want)
+	if got, want := len(tree.Fixed()), 2; got != want {
+		t.Fatalf("%d fixed transforms, want %d", got, want)
+	}
+	if got, want := len(tree.Published()), 2; got != want {
+		t.Fatalf("%d published transforms, want %d", got, want)
 	}
 	if got, want := strings.Join(tree.Frames(), ","), "base_link,imu,laser,map,odom"; got != want {
 		t.Fatalf("frames %s, want %s", got, want)

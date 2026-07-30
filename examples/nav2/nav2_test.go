@@ -9,6 +9,7 @@ import (
 
 	"conductor.dev/conductor"
 	"conductor.dev/conductor/conductortest"
+	"conductor.dev/conductor/internal/urdf"
 )
 
 // These tests run the commander's mission against a scripted Nav2 — the six
@@ -373,6 +374,33 @@ func TestWatchdogDoesNotCallArrivalAStall(t *testing.T) {
 	}
 }
 
+// The lidar's mounting comes from the robot's own description: frames.json is
+// derived from turtlebot3_waffle.urdf, so the number the watchdog reports is the
+// one in the URDF — and it resolves even though robot_state_publisher, not this
+// application, publishes that transform.
+func TestGeometryComesFromTheRobotDescription(t *testing.T) {
+	watchdog := &Watchdog{}
+	conductortest.RunWith(t, conductortest.Options{Frames: mustFrames(t)}, watchdog)
+
+	// turtlebot3_waffle.urdf: the scan joint is 64mm behind base_link, 122mm up.
+	if math.Abs(watchdog.lidarAhead-(-0.064)) > 1e-9 {
+		t.Errorf("lidar %v m ahead of base_link, want the URDF's -0.064", watchdog.lidarAhead)
+	}
+	if math.Abs(watchdog.lidarAbove-0.122) > 1e-9 {
+		t.Errorf("lidar %v m above base_link, want the URDF's 0.122", watchdog.lidarAbove)
+	}
+
+	// And nothing here publishes it: that is robot_state_publisher's job, and
+	// publishing it too would put two static transforms on one child.
+	tree := mustFrames(t)
+	if got := len(tree.Published()); got != 0 {
+		t.Errorf("%d transform(s) would be published by this application, want none", got)
+	}
+	if got := len(tree.Fixed()); got != 10 {
+		t.Errorf("%d fixed transforms, want the URDF's 10", got)
+	}
+}
+
 // A watchdog with no pose is stale rather than optimistic: it cannot tell
 // whether the robot is moving, and says so.
 func TestWatchdogWithoutLocalizationIsStale(t *testing.T) {
@@ -405,4 +433,48 @@ func value(s DiagnosticStatus, key string) float64 {
 		}
 	}
 	return math.NaN()
+}
+
+// frames.json is derived from turtlebot3_waffle.urdf — the description the
+// simulation and the real robot are both launched with — so it can drift from
+// it. This is the drift check, and it is also where the two halves of the tree
+// show: the robot's geometry comes from the URDF, and the world links into it
+// (map -> odom, odom -> base_footprint) come from amcl and the odometry, which
+// no description mentions.
+func TestCommittedFramesMatchTheDescription(t *testing.T) {
+	robot, err := urdf.Load("turtlebot3_waffle.urdf")
+	if err != nil {
+		t.Fatal(err)
+	}
+	derived, _ := urdf.Frames(robot, urdf.Options{})
+
+	committed := mustFrames(t)
+	byChild := map[string]conductor.Transform{}
+	for _, tf := range committed.Transforms {
+		byChild[tf.Child] = tf
+	}
+	for _, want := range derived.Transforms {
+		got, ok := byChild[want.Child]
+		if !ok {
+			t.Errorf("frames.json is missing %s; re-derive it with conductor frames", want)
+			continue
+		}
+		if got != want {
+			t.Errorf("%s: frames.json says %+v, the description says %+v; re-derive it",
+				want.Child, got, want)
+		}
+	}
+
+	// Nothing the robot_state_publisher owns is claimed by this application.
+	for _, tf := range committed.Transforms {
+		if tf.Ours() {
+			t.Errorf("%s is claimed as ours, but this robot has a robot_state_publisher", tf)
+		}
+	}
+	// The world links are not in the URDF and must survive a re-derivation.
+	for _, child := range []string{"odom", "base_footprint"} {
+		if tf, ok := byChild[child]; !ok || !tf.Dynamic {
+			t.Errorf("frames.json lost the dynamic transform into %q", child)
+		}
+	}
 }

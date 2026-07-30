@@ -86,6 +86,11 @@ dashboard: ## run examples/patrol with the live dashboard (served by default)
 fleet: ## (ROS) run examples/patrol as one process per node, behind the fleet view
 	@$(WITHROS) $(CLI) run examples/patrol -env robot -robot patrol-1 -split
 
+.PHONY: frames
+frames: ## re-derive both examples' frames.json from their robot descriptions
+	$(CLI) frames -from examples/nav2/turtlebot3_waffle.urdf -o examples/nav2/frames.json
+	$(CLI) frames -from examples/patrol/patrol.urdf -o examples/patrol/frames.json -publish -fixed-only
+
 .PHONY: externals
 externals: ## (ROS) read the running graph and compare it with examples/nav2's externals
 	@$(WITHROS) go run -tags zenoh ./cmd/conductor externals examples/nav2 $(ARGS)

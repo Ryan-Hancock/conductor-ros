@@ -53,14 +53,28 @@ func TestMissionDot(t *testing.T) {
 	}
 }
 
-// The transform tree is drawn with the static links we publish separated from
-// the dynamic ones we only expect.
+// The transform tree is drawn along both axes it carries: known-or-not, and
+// ours-or-somebody-else's.
 func TestFramesDot(t *testing.T) {
 	dot := FramesDot(missionGraph())
 	if !strings.Contains(dot, `"base_link" -> "laser" [label="0.12 0 0.19"`) {
-		t.Errorf("frames.dot is missing the static link:\n%s", dot)
+		t.Errorf("frames.dot is missing the transform we publish:\n%s", dot)
 	}
-	if !strings.Contains(dot, `"map" -> "odom" [style=dashed, label="amcl"`) {
+	if !strings.Contains(dot, `"map" -> "odom" [style=dashed, color=grey40, fontcolor=grey40, label="amcl"`) {
 		t.Errorf("frames.dot is missing the dynamic link:\n%s", dot)
+	}
+}
+
+// A fixed transform somebody else publishes is drawn solid (its value is known)
+// but greyed and attributed: it is not ours to put on tf_static.
+func TestFramesDotAttributesFixedTransforms(t *testing.T) {
+	g := missionGraph()
+	g.Frames.Transforms = append(g.Frames.Transforms, conductor.Transform{
+		Parent: "base_link", Child: "base_scan",
+		XYZ: [3]float64{-0.064, 0, 0.122}, By: "robot_state_publisher",
+	})
+	dot := FramesDot(g)
+	if !strings.Contains(dot, `"base_link" -> "base_scan" [color=grey40, fontcolor=grey40, label="-0.064 0 0.122\nrobot_state_publisher"`) {
+		t.Errorf("frames.dot does not attribute the fixed transform:\n%s", dot)
 	}
 }

@@ -86,6 +86,10 @@ dashboard: ## run examples/patrol with the live dashboard (served by default)
 fleet: ## (ROS) run examples/patrol as one process per node, behind the fleet view
 	@$(WITHROS) $(CLI) run examples/patrol -env robot -robot patrol-1 -split
 
+.PHONY: externals
+externals: ## (ROS) read the running graph and compare it with examples/nav2's externals
+	@$(WITHROS) go run -tags zenoh ./cmd/conductor externals examples/nav2 $(ARGS)
+
 .PHONY: gen
 gen: ## regenerate launch XML, params, graph/mission/frames dot for examples/patrol
 	$(CLI) build examples/patrol

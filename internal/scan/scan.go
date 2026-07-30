@@ -174,7 +174,10 @@ type External struct {
 	Topic string `json:"topic"`
 	Type  string `json:"type"` // ROS interface name
 	Role  string `json:"role"` // "publisher", "subscriber", "server", or "client"
-	QoS   string `json:"qos"`
+	// QoS is omitted when empty so that generated blocks (conductor
+	// externals) do not write `"qos": ""` onto services and actions, which
+	// have no profile.
+	QoS string `json:"qos,omitempty"`
 }
 
 type config struct {

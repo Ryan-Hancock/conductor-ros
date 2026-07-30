@@ -11,6 +11,7 @@
 //	conductor run [dir]     run the app with everything its environment needs
 //	conductor deploy [dir]  build a release bundle and install it on a target
 //	conductor dashboard     serve the fleet view over a deployment's processes
+//	conductor externals     derive conductor.json's externals from a live graph
 package main
 
 import (
@@ -48,6 +49,8 @@ func main() {
 		err = runRun(os.Args[2:])
 	case "dashboard":
 		err = runDashboard(os.Args[2:])
+	case "externals":
+		err = runExternals(os.Args[2:])
 	case "msggen":
 		err = runMsggen(os.Args[2:])
 	default:
@@ -93,6 +96,15 @@ func usage() {
                             -peers [name=]url,...  aggregate an ad-hoc set
                             -traces N              stitch traces across processes
                             -once                  print the merged state as JSON
+  conductor externals [dir] [-env <name>] [-endpoint tcp/host:port]
+                          read a live ROS graph and compare it with the
+                          externals conductor.json declares
+                            -write     update conductor.json's block
+                            -check     exit non-zero if they disagree
+                            -all       include interfaces this app does not use
+                            -infra     include parameter/lifecycle services
+                            -raw       print the graph as discovered
+                          (needs the zenoh transport: build with -tags zenoh)
   conductor msggen -out <dir> [-pkg <gopkg>] [-ros-pkg <pkg>] <target...>
                           generate Go message types (with computed RIHS01
                           hashes) from .msg definitions; targets are ROS

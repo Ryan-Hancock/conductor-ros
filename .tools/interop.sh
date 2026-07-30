@@ -71,6 +71,7 @@ go build -tags zenoh -o "$BIN/mission" ./examples/mission
 go build -tags zenoh -o "$BIN/turtlesim" ./examples/turtlesim
 go build -tags zenoh -o "$BIN/nav2" ./examples/nav2
 go build -tags zenoh -o "$BIN/nav2stub" ./examples/nav2stub
+go build -tags zenoh -o "$BIN/conductor" ./cmd/conductor
 
 echo "starting zenoh router..."
 bg "$WORK/router.log" "$CONDUCTOR_OVERLAY/lib/rmw_zenoh_cpp/rmw_zenohd"
@@ -191,6 +192,7 @@ fi
 if [[ "$GROUP" == all || "$GROUP" == services ]]; then
   echo "services:"
   bg "$WORK/patrol.log" "$BIN/patrol" -transport zenoh -frames examples/patrol/frames.json
+  services_pid="$LAST_PID"
   sleep 3
 
   ros2run 20 service call /engage_estop std_srvs/srv/SetBool "{data: true}" \
@@ -199,6 +201,14 @@ if [[ "$GROUP" == all || "$GROUP" == services ]]; then
 
   ros2run 20 topic echo --once /cmd_vel >"$WORK/topic.log" 2>&1
   check "conductor publisher -> ros2 topic echo" "$WORK/topic.log" "linear:"
+
+  # Every group has to leave the graph as it found it. This one used not to,
+  # and a patrol left publishing /cmd_vel as a plain Twist put two types on one
+  # topic for every later group — which is the poison the header warns about,
+  # and which the nav2 discovery leg is the first thing sensitive enough to
+  # notice.
+  { kill -9 "$services_pid"; wait "$services_pid"; } 2>/dev/null
+  sleep 1
 fi
 
 if [[ "$GROUP" == all || "$GROUP" == frames ]]; then
@@ -258,6 +268,12 @@ fi
 
 if [[ "$GROUP" == all || "$GROUP" == nav2 ]]; then
   echo "nav2:"
+  # Discovery reads the whole graph, so this group is the one that notices any
+  # process an earlier group left behind. Start from a clean one.
+  pkill -9 -x patrol 2>/dev/null
+  pkill -9 -x fibonacci 2>/dev/null
+  pkill -9 -x mission 2>/dev/null
+  sleep 1
   # Nav2's interfaces are vendored .action/.srv text hashed locally, and
   # nav2_msgs is NOT installed here. So these checks answer the question that
   # matters: does the rest of ROS see the same interfaces a real Nav2 would
@@ -291,10 +307,26 @@ YAML
 
   # Nav2 publishes TwistStamped on cmd_vel now (enable_stamped_cmd_vel), in
   # the costmap's base frame: both are readable by a stock ros2 CLI. The type
-  # is named because earlier groups leave a plain Twist publisher of the same
-  # topic in the graph, and an ambiguous echo refuses to guess.
+  # is named explicitly so this asserts the type rather than whatever single
+  # publisher happens to be on the topic.
   ros2run 25 topic echo --once /cmd_vel geometry_msgs/msg/TwistStamped >"$WORK/nav2_cmd.log" 2>&1
   check "cmd_vel decodes as TwistStamped in base_link" "$WORK/nav2_cmd.log" "frame_id: base_link"
+
+  # The declarations are meant to describe the real system, so the strongest
+  # check available is to derive them from the running graph and require that
+  # the committed file already says the same thing. A wrong type or QoS in
+  # conductor.json is silence at runtime; this is what catches it.
+  "$BIN/conductor" externals examples/nav2 -check >"$WORK/nav2_externals.log" 2>&1
+  if [[ $? -eq 0 ]]; then
+    echo "  PASS  committed externals match the live graph"
+    PASS=$((PASS + 1))
+  else
+    echo "  FAIL  committed externals match the live graph"
+    sed 's/^/        /' "$WORK/nav2_externals.log" | head -12
+    FAIL=$((FAIL + 1))
+  fi
+  check "the graph supplies nav2's action types, not conductor.json" \
+    "$WORK/nav2_externals.log" "nav2_msgs/action/NavigateToPose"
 
   # Then the application itself against it: lifecycle startup, a waypoint
   # reached, and a goal aborted into the recovery branch and retried.

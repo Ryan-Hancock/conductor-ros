@@ -1,15 +1,17 @@
 # Conductor — Design
 
-*Status: v1.4 — static toolchain + pluggable-transport runtime, an
+*Status: v1.5 — static toolchain + pluggable-transport runtime, an
 rmw_zenoh transport verified against live ROS 2 (Lyrical) traffic,
 `.msg`/`.srv`/`.action`-to-Go codegen with local REP-2011 hash computation,
 lifecycle, parameters, observability with a built-in dashboard, an in-process
 test harness, declared environments, single-binary deployment with
 graph-derived systemd units, declarative missions, a declared transform tree,
 a fleet view that merges a deployment's processes — across robots — into
-one graph, and a worked Nav2 example that drives a real navigation stack
-through its lifecycle, its recovery behaviours and its actions. This document
-records the vision, the architecture, and the decisions still open.*
+one graph, a worked Nav2 example that drives a real navigation stack through
+its lifecycle, its recovery behaviours and its actions, and discovery that
+derives the externals block from a live graph rather than trusting a hand
+transcription of it. This document records the vision, the architecture, and
+the decisions still open.*
 
 ## Thesis
 
@@ -192,10 +194,11 @@ consolidation explicitly, with a comment) are the exact places bugs hide.
 | Task orchestration (state machines/BTs) | XML/hand-rolled | `Mission`/`Step` fields with tagged transitions; targets checked (including literal `Goto`s), unreachable steps warned, machine drawn in mission.dot, current step observable | ✅ v1.2 |
 | TF conventions | `static_transform_publisher` in a launch file | `frames.json` published on tf_static, `TF.Lookup` composition, `frame:` tags that stamp and check headers, tree checked at build time | ✅ v1.2 |
 | Driving Nav2 | hand-written action clients, `wait_for_service` loops, a behaviour tree XML for the sequencing, `lifecycle_manager` for the startup | `examples/nav2`: the stack's startup is a mission step, recovery is a `fail:` branch onto Nav2's own behaviours, docking is a checked `Goto`; upstream `nav2_msgs` definitions so the hashes are Nav2's; a stand-in stack so it runs without one | ✅ v1.4 |
-| Driving MoveIt | as above, plus planning-group magic strings | the same treatment; the largest nested messages in common use, so also a CDR/msggen stress test | v1.5 |
-| Externals of someone else's graph | hand-transcribed from source | generated from a live graph and diffed against what is declared; a lifecycle *client* rather than a service call per manager | v1.5 |
-| Robot description | URDF + xacro, constants duplicated into code and launch files | `frames.json` derived from the URDF's fixed joints, `/robot_description` published, SRDF planning groups declared and checked like frames | v1.5 |
-| Simulation | `use_sim_time` folklore, hand-written spawn scripts | the simulator is a declared `requires`; a clock source behind `Timer` and header stamping so sim time is the same code path as wall time | v1.5 |
+| Externals of someone else's graph | hand-transcribed from source | `conductor externals`: read the liveliness graph, roll actions up, derive the block, and diff it against what is declared (`-check` in CI, `-write` to update) | ✅ v1.5 |
+| Driving MoveIt | as above, plus planning-group magic strings | the same treatment as Nav2; the largest nested messages in common use, so also a CDR/msggen stress test | v1.6 |
+| Bringing a managed stack up | `lifecycle_manager` + `autostart`, ordering in a launch file | a lifecycle *client*: drive transitions and wait for Active in the graph's own order, over the set discovery already found | v1.6 |
+| Robot description | URDF + xacro, constants duplicated into code and launch files | `frames.json` derived from the URDF's fixed joints, `/robot_description` published, SRDF planning groups declared and checked like frames | v1.6 |
+| Simulation | `use_sim_time` folklore, hand-written spawn scripts | the simulator is a declared `requires`; a clock source behind `Timer` and header stamping so sim time is the same code path as wall time | v1.6 |
 
 ## Observability (v0.8, implemented)
 
@@ -554,24 +557,73 @@ Four things this found, which is the point of building it:
   the checker is supposed to prevent — and it cannot, because it is checking a
   hand-written claim about someone else's graph. Hence the first item below.
 
-## What comes next (v1.5 and beyond)
+## Reading someone else's graph (v1.5, implemented)
+
+Every other declaration in Conductor is derived from something the toolchain
+can see: the graph from the code, the units from the graph, the bringup order
+from the dependency edges. The externals block was the exception — a hand
+transcription of somebody else's system, believed absolutely by the checker.
+The Nav2 example made the cost concrete: two entries were only right after
+reading Nav2's source, and being wrong in either would have produced silence
+that the checker would have cheerfully validated.
+
+So the last hand-written declaration becomes a derived one. `conductor
+externals` queries the graph and reports the difference; `-write` updates
+conductor.json, `-check` fails a script.
+
+**Discovery costs nothing new.** rmw_zenoh advertises every entity as a
+liveliness token whose key expression already carries the node, the topic, the
+DDS type, the RIHS01 hash and the QoS profile — and `transport/rmwzenoh`
+already wrote those tokens, byte-for-byte, to be indistinguishable from a C++
+node. Reading the graph is that mapping run backwards: a parser in the same
+pure-Go package, tested by round-tripping every token the writer can produce
+and by decoding one captured from live rmw_zenoh traffic. No ROS install, no
+`ros2` CLI to parse, no daemon whose cache might be stale.
+
+Three judgements make the difference between a generator worth using and one
+that is only mostly right:
+
+- **An action is one interface.** rmw sees three services and two topics; the
+  declaration wants `nav2_msgs/action/NavigateToPose`, recovered from the
+  derived types (`..._SendGoal` and friends). Infrastructure every node carries
+  — parameter services, lifecycle services, `/rosout`, `/tf` — is filtered by
+  *type* rather than by name, because names move with namespaces and types do
+  not.
+- **A role describes the outside, and we are not outside.** Our subscription
+  needs an external publisher; our client needs a server. The application's own
+  nodes are excluded by name, since a conductor process on the graph advertises
+  everything it publishes, and declaring that external would tell the checker
+  its own topics come from somewhere else.
+- **Disagreement is reported, never averaged.** Two publishers offering
+  different profiles make "the" QoS of a topic a question: the weakest offer is
+  declared, because that is what a subscriber must match to hear all of them,
+  and the disagreement is named. Two peers advertising different type *hashes*
+  for one interface are running different definitions of it — a fault no
+  comparison of type names can see. And a declaration the graph cannot confirm
+  is reported `absent` and kept: half a stack being up is the normal state of a
+  robot under development, and a tool that deleted declarations on that basis
+  would be worse than the transcription it replaced.
+
+`-write` also refuses to flatten an environment's `externals`/`without` overlay
+into the base file. The list this command sees is the merged one, and writing
+it back would quietly make a simulation's stand-in drivers part of every
+environment.
+
+The honest limitation: this reads a *zenoh* graph, so the command needs the cgo
+transport compiled in — and without it, it says so rather than reporting an
+empty graph, because "nothing is running" and "I cannot look" are different
+answers. It is also a snapshot: what is up now, not what the robot has when
+everything is running, which is why `-check` belongs in the interop matrix
+(where the stack is deliberately up) rather than in `conductor check`.
+
+## What comes next (v1.6 and beyond)
 
 The pattern so far is that each milestone took something ROS leaves as
 folklore and made it a declaration the toolchain can read. What follows is
 the same exercise applied to the places a conductor application still meets
 the ecosystem by hand.
 
-### Generating externals, and driving lifecycles directly
-
-The Nav2 example above turned two of these from ideas into needs.
-
-**Externals from a live graph.** `conductor.json` claims what exists outside
-the application, and the checker trusts that claim completely — so a wrong
-type or QoS is silence at runtime, exactly what the checker exists to prevent.
-The answer is to stop hand-writing it: introspect a running system and emit
-the block (`conductor externals -from-graph`), diffing it against what is
-declared. That is also the adoption path into an existing stack, which is a
-larger prize than the convenience.
+### Driving lifecycles directly, and the next big stack
 
 **A lifecycle client.** Nav2's nodes are managed nodes driven by a
 `lifecycle_manager`, and the example drives that manager over its
@@ -580,7 +632,9 @@ Conductor already derives. A first-class client (drive a transition, wait for
 Active, report which of a set is not up) could replace the manager with
 something whose order comes from the graph. The runtime already speaks the
 protocol as a server, the fleet rollout already waits for Active, and the
-example is now the third caller of the same machinery.
+example is now the third caller of the same machinery. Discovery makes it
+sharper still: `conductor externals` can already see which lifecycle services
+exist and on which nodes, so the set to drive need not be written down either.
 
 **A MoveIt example** is the harder one, and useful for a second reason: its
 interfaces (`moveit_msgs/action/MoveGroup`, the planning scene, joint

@@ -1060,6 +1060,76 @@ retried := await(t, nav.goals, "the retried goal")
 // retried is the same waypoint: a failed goal does not advance the route
 ```
 
+## `conductor externals`: ask the graph instead of transcribing it
+
+The externals block is the one thing the checker takes entirely on trust. It
+says what exists outside the application, and every entry in it was copied by
+hand out of somebody else's source. The Nav2 example needed two details that
+are only findable that way — `cmd_vel` is `TwistStamped` now, `amcl_pose` is
+latched — and getting either wrong produces **silence**, which is precisely the
+failure the checker exists to prevent. It cannot help: it is faithfully
+checking the wrong claim.
+
+A running system already knows. rmw_zenoh advertises every node, publisher,
+subscription, service and client as a liveliness token carrying the topic, the
+type, its RIHS01 hash and the QoS offered, so conductor asks the network:
+
+```sh
+conductor externals examples/nav2            # what the graph says, and how it differs
+conductor externals examples/nav2 -check     # exit non-zero if they disagree
+conductor externals examples/nav2 -write     # update conductor.json
+conductor externals examples/nav2 -all       # everything out there, not just what we use
+```
+
+```
+app nav2 [env stub] — read 7 node(s) from the graph on domain 0 via tcp/127.0.0.1:7447
+
+  mismatch  amcl_pose (publisher)   declared qos "reliable", but the publisher offers "transient"
+  mismatch  cmd_vel (publisher)     declared as geometry_msgs/msg/Twist, but the graph
+                                    offers geometry_msgs/msg/TwistStamped
+  absent    diagnostics (subscriber)  declared as an external subscriber of
+                                      diagnostic_msgs/msg/DiagnosticArray, but nothing
+                                      on the graph offers it
+```
+
+Four things it is careful about, because a generator that is only mostly right
+is worse than transcription:
+
+- **An action is one interface, not seven.** rmw sees three services and two
+  topics; the block gets `nav2_msgs/action/NavigateToPose` with the role
+  `action_server`, recovered from the derived types.
+- **Roles describe the outside.** Our subscription needs an external
+  *publisher*; our client needs a *server*. The application's own nodes are
+  excluded — a conductor process advertises everything it publishes, and
+  declaring that external would tell the checker its own topics come from
+  elsewhere.
+- **Publishers that disagree are named, not averaged.** Two publishers offering
+  different profiles make "the" QoS a question; the weakest offer is declared,
+  because that is the one a subscriber must match to hear both, and the
+  disagreement is reported. Two peers advertising different *type hashes* for
+  one interface are running different definitions of it — invisible to any
+  comparison of type names, and reported as a conflict.
+- **It does not delete what it cannot see.** A declared external that nothing
+  answers for is reported as `absent` and left alone: half a stack being up is
+  the normal case while developing. Nor will `-write` flatten an
+  environment's `externals`/`without` overlay into the base file; it refuses
+  and says where the entries belong.
+
+`-check` is the form for a script, and `make interop` runs it: the committed
+`examples/nav2/conductor.json` must match a live graph, which is a stronger
+statement than any hand-written test of the same file.
+
+This needs the zenoh transport compiled in, since reading the graph means
+speaking to it:
+
+```sh
+make externals                                     # or:
+go run -tags zenoh ./cmd/conductor externals examples/nav2
+```
+
+Without it the command says so rather than reporting an empty graph — "nothing
+is running" is a different answer from "I cannot look".
+
 ## Deployment
 
 Shipping a ROS 2 application usually means shipping a colcon workspace and
@@ -1143,7 +1213,7 @@ $ systemctl --user status patrol.service
 
 ## Status
 
-v1.3 — the static toolchain (scan → validate → generate) works; the runtime
+v1.5 — the static toolchain (scan → validate → generate) works; the runtime
 executes nodes over a pluggable transport: in-process bus by default, or
 Zenoh/rmw_zenoh to join a live ROS 2 graph (see above). CDR serialization is
 pure Go, byte-verified against rclpy; `.msg`/`.srv`/`.action` codegen
@@ -1161,9 +1231,10 @@ transitions, checked by the same toolchain and drawn in `gen/mission.dot` —
 and so is the transform tree: `frames.json` is published on `tf_static`,
 composed by `TF.Lookup`, stamped into headers by a `frame:` tag, and
 validated at build time. `.tools/interop.sh` checks every leg against real
-ROS 2 — 36 of them, including tf2 composing our declared transforms, the
-whole turtlesim tutorial, and Nav2's interfaces being discoverable under
-their own type names from vendored definitions. A deployment's processes aggregate into one fleet
+ROS 2 — 38 of them, including tf2 composing our declared transforms, the
+whole turtlesim tutorial, Nav2's interfaces being discoverable under their own
+type names from vendored definitions, and an externals block derived from a
+live graph matching the one that is committed. A deployment's processes aggregate into one fleet
 view — union graph, findings only the merge can see, and traces stitched
 across processes — and an environment may run on several robots, rolled out
 one at a time behind a health gate. `conductor run` brings an environment up
@@ -1181,10 +1252,14 @@ hashes are Nav2's. It runs against a real `nav2_bringup`, against the
 stand-in in [examples/nav2stub](examples/nav2stub/main.go), and inside `go
 test`.
 
-Next, in rough order: the same treatment for MoveIt, with externals
-generated from a live graph instead of hand-listed; `frames.json` derived
-from a URDF; and simulated time behind the same clock abstraction the test
-harness already proves out. Transient-local latching (`tf_static` is
+`conductor externals` derives that block from a live graph instead — the
+adoption path into a stack that already exists, and the only way to catch a
+declaration that is self-consistent and wrong about the world.
+
+Next, in rough order: the same treatment for MoveIt; a first-class lifecycle
+client, so bringing a managed stack up is the graph's ordering rather than one
+service call; `frames.json` derived from a URDF; and simulated time behind the
+same clock abstraction the test harness already proves out. Transient-local latching (`tf_static` is
 republished instead) and multi-instance node namespacing remain open. See
 [What comes next](DESIGN.md#what-comes-next-v14-and-beyond) in
 [DESIGN.md](DESIGN.md).
@@ -1196,6 +1271,7 @@ republished instead) and multi-instance node namespacing remain open. See
 - [internal/scan](internal/scan/scan.go) — syntactic scanner for directives and declarations ([environments, robots, requires](internal/scan/environments.go))
 - [internal/run](internal/run/run.go) — `conductor run`: start what the environment needs, run the app, stop it all
 - [internal/graph](internal/graph/graph.go) — topic graph construction + validation rules ([missions](internal/graph/mission.go), [frames](internal/graph/frames.go))
+- [internal/discover](internal/discover/graph.go) — read a live ROS graph; derive and diff [externals](internal/discover/externals.go)
 - [internal/gen](internal/gen/gen.go) — launch/params/dot and [systemd unit](internal/gen/systemd.go) generation
 - [internal/deploy](internal/deploy/deploy.go) — cross-compile, bundle, ship, roll back
 - [cdr](cdr/cdr.go) — pure-Go CDR (XCDR1-LE) codec, golden-tested against rclpy

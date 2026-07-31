@@ -21,6 +21,18 @@ type inproc struct {
 	subs    map[string][]func(any, Metadata)
 	pubs    map[string][]string
 	servers map[string]func(any) (any, error)
+
+	// latched holds what transient-local publishers have sent, so a
+	// subscriber that joins later still gets it — the durability a
+	// latched topic promises, and the reason /tf_static works for a node
+	// that started after the tree was published.
+	latched map[string][]retained
+}
+
+// retained is one message kept for late subscribers.
+type retained struct {
+	msg any
+	md  Metadata
 }
 
 func newInproc() *inproc {
@@ -28,6 +40,7 @@ func newInproc() *inproc {
 		subs:    map[string][]func(any, Metadata){},
 		pubs:    map[string][]string{},
 		servers: map[string]func(any) (any, error){},
+		latched: map[string][]retained{},
 	}
 }
 
@@ -37,10 +50,25 @@ func (b *inproc) Publisher(spec TopicSpec) (func(any, Metadata) error, error) {
 	b.mu.Lock()
 	b.pubs[spec.Topic] = append(b.pubs[spec.Topic], spec.Node)
 	b.mu.Unlock()
+
+	keep := 0
+	if spec.QoS.Durability == TransientLocal {
+		keep = spec.QoS.Depth
+		if keep <= 0 {
+			keep = 1
+		}
+	}
 	return func(msg any, md Metadata) error {
-		b.mu.RLock()
+		b.mu.Lock()
+		if keep > 0 {
+			history := append(b.latched[spec.Topic], retained{msg: msg, md: md})
+			if len(history) > keep {
+				history = history[len(history)-keep:]
+			}
+			b.latched[spec.Topic] = history
+		}
 		subs := b.subs[spec.Topic]
-		b.mu.RUnlock()
+		b.mu.Unlock()
 		for _, deliver := range subs {
 			deliver(msg, md)
 		}
@@ -50,8 +78,21 @@ func (b *inproc) Publisher(spec TopicSpec) (func(any, Metadata) error, error) {
 
 func (b *inproc) Subscribe(spec TopicSpec, deliver func(any, Metadata)) error {
 	b.mu.Lock()
-	defer b.mu.Unlock()
 	b.subs[spec.Topic] = append(b.subs[spec.Topic], deliver)
+	// A transient-local subscriber asks for what it missed. Volatile ones do
+	// not: requesting less durability than is offered is legal, and it means
+	// "only what happens from now on".
+	var history []retained
+	if spec.QoS.Durability == TransientLocal {
+		history = append(history, b.latched[spec.Topic]...)
+	}
+	b.mu.Unlock()
+
+	// Delivered outside the lock, and after the subscription is registered, so
+	// the ordering a subscriber sees is history first and then live messages.
+	for _, r := range history {
+		deliver(r.msg, r.md)
+	}
 	return nil
 }
 

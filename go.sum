@@ -2,3 +2,5 @@ github.com/BooleanCat/option v0.1.0 h1:wLwWbWnxUEAhpH+Gixy9OjFRnxmwm+nHcZQ8a2Joz
 github.com/BooleanCat/option v0.1.0/go.mod h1:vzGAJoquxEsprjj3qidyQTSQzqWDztoj9mO84BoY+YU=
 github.com/eclipse-zenoh/zenoh-go v1.9.0 h1:OKjUYd3foYsp7NY5B9aH+yFLUba9caUDmJSUOXqBLkI=
 github.com/eclipse-zenoh/zenoh-go v1.9.0/go.mod h1:PeY2+x6VPEFpl/FMLfOl+zwsLxbUjresV5AAT158l80=
+github.com/go-delve/delve v1.24.0 h1:M1auuI7kyfXZm5LMDQEqhqr4koKWOzGKhCgwMxsLQfo=
+github.com/go-delve/delve v1.24.0/go.mod h1:yNWXOuo4yslMOOj7O8gIRrf/trDBrFy5ZXwJL4ZzOos=

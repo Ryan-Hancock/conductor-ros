@@ -13,6 +13,7 @@ import (
 
 	"github.com/BooleanCat/option"
 	zgo "github.com/eclipse-zenoh/zenoh-go/zenoh"
+	zext "github.com/eclipse-zenoh/zenoh-go/zenoh/zenohext"
 
 	conductor "conductor.dev/conductor"
 	"conductor.dev/conductor/cdr"
@@ -55,7 +56,9 @@ type transport struct {
 	nids       map[string]int
 	tokens     []zgo.LivelinessToken
 	subs       []zgo.Subscriber
+	advSubs    []zext.AdvancedSubscriber
 	pubs       []*zgo.Publisher
+	advPubs    []*zext.AdvancedPublisher
 	queryables []zgo.Queryable
 	queriers   []*zgo.Querier
 }
@@ -102,13 +105,53 @@ func (t *transport) Publisher(spec conductor.TopicSpec) (func(any, conductor.Met
 	if err != nil {
 		return nil, err
 	}
-	pub, err := t.session.DeclarePublisher(ke, nil)
-	if err != nil {
-		return nil, err
+	// A transient-local publisher keeps a cache its late subscribers can query:
+	// that is what durability *is* on this transport, and it is how rmw_zenoh
+	// implements it, so a ROS subscriber gets our history and ours gets theirs.
+	put := func(payload []byte, att []byte) error { return nil }
+	var basePub *zgo.Publisher
+	var advPub *zext.AdvancedPublisher
+	if spec.QoS.Durability == conductor.TransientLocal {
+		opts := &zext.AdvancedPublisherOptions{
+			PublisherDetection: true,
+			Cache:              option.Some(zext.AdvancedPublisherCacheOptions{MaxSamples: uint(depthOf(spec.QoS))}),
+		}
+		if spec.QoS.Reliability == conductor.Reliable {
+			// Lets a subscriber notice it missed a sample and ask the cache for
+			// it. Sporadic keeps the background traffic down, as rmw_zenoh does.
+			opts.SampleMissDetection = option.Some(zext.AdvancedPublisherSampleMissDetectionOptions{
+				HeartbeatMode: zext.HeartbeatModeSporadic(heartbeatPeriodMs),
+			})
+		}
+		p, err := zext.Ext(&t.session).DeclareAdvancedPublisher(ke, opts)
+		if err != nil {
+			return nil, err
+		}
+		advPub = &p
+		put = func(payload, att []byte) error {
+			return advPub.Put(zgo.NewZBytes(payload), &zext.AdvancedPublisherPutOptions{
+				Attachment: option.Some(zgo.NewZBytes(att)),
+			})
+		}
+	} else {
+		p, err := t.session.DeclarePublisher(ke, nil)
+		if err != nil {
+			return nil, err
+		}
+		basePub = &p
+		put = func(payload, att []byte) error {
+			return basePub.Put(zgo.NewZBytes(payload), &zgo.PublisherPutOptions{
+				Attachement: option.Some(zgo.NewZBytes(att)),
+			})
+		}
 	}
 
 	t.mu.Lock()
-	t.pubs = append(t.pubs, &pub)
+	if basePub != nil {
+		t.pubs = append(t.pubs, basePub)
+	} else {
+		t.advPubs = append(t.advPubs, advPub)
+	}
 	nid, eid := t.endpointIDs(spec.Node)
 	err = t.declareToken(rmwzenoh.EndpointToken(t.domain, t.zid, nid, eid,
 		rmwzenoh.EntityPublisher, spec.Node, "/"+spec.Topic, info.DDSType(), info.Hash, spec.QoS))
@@ -131,10 +174,22 @@ func (t *transport) Publisher(spec conductor.TopicSpec) (func(any, conductor.Met
 		if md.Trace.Valid() {
 			att = rmwzenoh.AppendTraceContext(att, md.Trace.TraceID, md.Trace.SpanID, md.Trace.Sampled)
 		}
-		return pub.Put(zgo.NewZBytes(payload), &zgo.PublisherPutOptions{
-			Attachement: option.Some(zgo.NewZBytes(att)),
-		})
+		return put(payload, att)
 	}, nil
+}
+
+// heartbeatPeriodMs is how often a reliable transient-local publisher announces
+// its latest sequence number, so a subscriber can notice a gap and ask for what
+// it missed. rmw_zenoh uses the same idea; the period only costs traffic when
+// nothing else is being published.
+const heartbeatPeriodMs = 1000
+
+// depthOf is the history a transient-local endpoint keeps or asks for.
+func depthOf(q conductor.QoS) int {
+	if q.Depth <= 0 {
+		return 1
+	}
+	return q.Depth
 }
 
 func (t *transport) Subscribe(spec conductor.TopicSpec, deliver func(any, conductor.Metadata)) error {
@@ -148,7 +203,7 @@ func (t *transport) Subscribe(spec conductor.TopicSpec, deliver func(any, conduc
 	}
 	msgType := spec.Type
 	topic := spec.Topic
-	sub, err := t.session.DeclareSubscriber(ke, zgo.Closure[zgo.Sample]{Call: func(s zgo.Sample) {
+	onSample := zgo.Closure[zgo.Sample]{Call: func(s zgo.Sample) {
 		ptr := reflect.New(msgType)
 		if err := cdr.Unmarshal(s.Payload().Bytes(), ptr.Interface()); err != nil {
 			slog.Warn("conductor/zenoh: dropping undecodable message", "topic", topic, "err", err)
@@ -161,14 +216,46 @@ func (t *transport) Subscribe(spec conductor.TopicSpec, deliver func(any, conduc
 			}
 		}
 		deliver(ptr.Elem().Interface(), md)
-	}}, nil)
-	if err != nil {
-		return err
+	}}
+
+	// A transient-local subscriber asks publishers for what it missed, and
+	// keeps asking as late publishers appear — which is how a node that starts
+	// after the transform tree was published still receives it.
+	var sub zgo.Subscriber
+	var advSub *zext.AdvancedSubscriber
+	if spec.QoS.Durability == conductor.TransientLocal {
+		opts := &zext.AdvancedSubscriberOptions{
+			SubscriberDetection: true,
+			History: option.Some(zext.AdvancedSubscriberHistoryOptions{
+				DetectLatePublishers: true,
+				MaxSamples:           uint(depthOf(spec.QoS)),
+			}),
+		}
+		if spec.QoS.Reliability == conductor.Reliable {
+			opts.Recovery = option.Some(zext.AdvancedSubscriberRecoveryOptions{
+				LastSampleMissDetection: zext.LastSampleMissDetectionModeHeartbeat(),
+			})
+		}
+		s, err := zext.Ext(&t.session).DeclareAdvancedSubscriber(ke, onSample, opts)
+		if err != nil {
+			return err
+		}
+		advSub = &s
+	} else {
+		s, err := t.session.DeclareSubscriber(ke, onSample, nil)
+		if err != nil {
+			return err
+		}
+		sub = s
 	}
 
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	t.subs = append(t.subs, sub)
+	if advSub != nil {
+		t.advSubs = append(t.advSubs, *advSub)
+	} else {
+		t.subs = append(t.subs, sub)
+	}
 	nid, eid := t.endpointIDs(spec.Node)
 	return t.declareToken(rmwzenoh.EndpointToken(t.domain, t.zid, nid, eid,
 		rmwzenoh.EntitySubscription, spec.Node, "/"+spec.Topic, info.DDSType(), info.Hash, spec.QoS))
@@ -339,7 +426,13 @@ func (t *transport) Close() error {
 	for _, s := range t.subs {
 		s.Drop()
 	}
+	for _, s := range t.advSubs {
+		s.Drop()
+	}
 	for _, p := range t.pubs {
+		p.Drop()
+	}
+	for _, p := range t.advPubs {
 		p.Drop()
 	}
 	for _, q := range t.queryables {

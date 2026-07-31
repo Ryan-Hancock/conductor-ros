@@ -113,6 +113,7 @@ make turtlesim  # the tutorial below, router and turtlesim_node included
 | `conductor.Lifecycle` + `.BringUp(ctx)` | Drive other managed nodes (`nodes:"a,b,c"`, in bringup order) |
 | `robot.urdf` | Robot description; `conductor frames -from` derives `frames.json` from it |
 | `conductor.Group` + `.State("ready")` | Planning group from the robot's SRDF (`group:"panda_arm"`), with its named joint configurations |
+| `qos:"transient"` | Latched: late subscribers get the last message, as `/tf_static` needs |
 | `//ros:type pkg/msg/Name` on a struct | Maps a Go message type to its ROS interface |
 | `conductor.json` | App name + topics provided/consumed by external ROS nodes |
 
@@ -425,9 +426,11 @@ Verified against real ROS 2: `ros2 topic echo /tf_static` reads the tree as
 `tf2_msgs/msg/TFMessage`, and `ros2 run tf2_ros tf2_echo base_link laser`
 reports the declared 0.12 m offset and 180° yaw.
 
-> Static transforms are republished at 1 Hz rather than latched, because
-> transient-local durability is not implemented yet (see DESIGN.md); a late
-> joiner therefore sees the tree within a second rather than instantly.
+Static transforms are published **once**, when the node becomes active, and
+latched: the topic is transient-local, so a subscriber that starts an hour later
+asks for the tree and gets it. `ros2 topic echo /tf_static` run long after the
+robot started returns immediately, and an `rviz` opened at any point sees the
+same tree.
 
 ## Parameters and environments
 
@@ -1443,7 +1446,7 @@ $ systemctl --user status patrol.service
 
 ## Status
 
-v1.8 — the static toolchain (scan → validate → generate) works; the runtime
+v1.9 — the static toolchain (scan → validate → generate) works; the runtime
 executes nodes over a pluggable transport: in-process bus by default, or
 Zenoh/rmw_zenoh to join a live ROS 2 graph (see above). CDR serialization is
 pure Go, byte-verified against rclpy; `.msg`/`.srv`/`.action` codegen
@@ -1461,7 +1464,7 @@ transitions, checked by the same toolchain and drawn in `gen/mission.dot` —
 and so is the transform tree: `frames.json` is published on `tf_static`,
 composed by `TF.Lookup`, stamped into headers by a `frame:` tag, and
 validated at build time. `.tools/interop.sh` checks every leg against real
-ROS 2 — 47 of them, including tf2 composing our declared transforms, the whole
+ROS 2 — 49 of them, including latched topics in both directions, tf2 composing our declared transforms, the whole
 turtlesim tutorial, Nav2's and MoveIt's interfaces being discoverable under
 their own type names from vendored definitions, an externals block derived from
 a live graph matching the one that is committed, and `ros2 lifecycle get`
@@ -1498,12 +1501,15 @@ MoveIt gets the same treatment in [examples/moveit](examples/moveit/commander.go
 pick and place as a mission, with planning groups and their named configurations
 declared from the robot's SRDF and checked at build time.
 
-Next, in rough order: `/robot_description` published, which needs transient-local
-durability; simulated time behind the same clock abstraction the test harness
-already proves out; and trace context that survives a publish from a mission
-step. Transient-local latching (`tf_static` is
-republished instead) and multi-instance node namespacing remain open. See
-[What comes next](DESIGN.md#what-comes-next-v14-and-beyond) in
+Transient-local durability is implemented on both transports, so `/tf_static` is
+published once and latched rather than repeated, and a conductor node receives a
+latched topic published before it started.
+
+Next, in rough order: `/robot_description` published (now unblocked); simulated
+time behind the same clock abstraction the test harness already proves out; and
+trace context that survives a publish from a mission step. Multi-instance node
+namespacing remains open. See
+[What comes next](DESIGN.md#what-comes-next-v19-and-beyond) in
 [DESIGN.md](DESIGN.md).
 
 ## Layout

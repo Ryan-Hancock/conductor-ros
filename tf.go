@@ -12,12 +12,6 @@ import (
 // tfStaticTopic is where ROS 2 expects latched static transforms.
 const tfStaticTopic = "tf_static"
 
-// tfStaticPeriod is how often the declared static transforms are republished.
-// ROS latches tf_static with transient-local durability; until Conductor
-// implements latching (see DESIGN.md), a slow repeat is what lets a late
-// joiner — an RViz started after the robot — see the tree.
-const tfStaticPeriod = time.Second
-
 // TF gives a node access to the application's declared transform tree: the
 // frames it may name, and the static transforms between them.
 //
@@ -96,9 +90,11 @@ func (f *TF) bind(rt *runtimeState, nr *nodeRuntime, field reflect.StructField, 
 		f.published.Add(1)
 	}
 	rt.recordProvides(nr.name, tfStaticTopic)
-	rt.timers = append(rt.timers, &timerHandle{period: tfStaticPeriod, node: nr, fire: send})
-	// Publish once as soon as the node is active, rather than after the
-	// first period: the tree is known before anything moves.
+	// Published once, when the node becomes active, and latched: the topic is
+	// transient-local, so a subscriber that starts later asks for it and gets
+	// it. This used to be a 1 Hz republish, which is what a transport without
+	// durability leaves you doing — a late joiner waited up to a second, and
+	// every other second of the robot's life carried a message nobody needed.
 	nr.onActive = append(nr.onActive, func() { nr.enqueue(send) })
 	slog.Info("conductor: publishing static transforms", "node", nr.name, "count", len(statics))
 	return nil

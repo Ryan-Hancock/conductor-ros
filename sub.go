@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"sync"
 )
 
 // Sub declares a subscription. The owning node must define a handler method
@@ -50,10 +51,44 @@ func (s *Sub[T]) bind(rt *runtimeState, nr *nodeRuntime, field reflect.StructFie
 	received := counter("conductor_messages_received_total", "node", nr.name, "topic", topic)
 	rt.recordEndpoint(Endpoint{Node: nr.name, Kind: EndpointSub, Field: field.Name, Name: topic,
 		Type: rosTypeName(reflect.TypeFor[T]()), QoS: q.Name, Frame: frame, count: countOf(received.Load)})
+	// A latched message arrives once, when the subscription is declared — which
+	// is before the node is active. Dropping it the way an event is dropped
+	// would mean a transient-local topic is never received at all: the whole
+	// point of durability is that the value is state, still true, and not about
+	// to be sent again. So it is held and delivered on activation.
+	var pending struct {
+		sync.Mutex
+		msg  any
+		md   Metadata
+		held bool
+	}
+	latched := q.Durability == TransientLocal
+	if latched {
+		nr.onActive = append(nr.onActive, func() {
+			pending.Lock()
+			msg, md, held := pending.msg, pending.md, pending.held
+			pending.msg, pending.held = nil, false
+			pending.Unlock()
+			if held {
+				nr.enqueue(func() {
+					if !nr.active() {
+						return
+					}
+					nr.runInstrumented(SpanSubscription, topic, md.Trace, func() { h(msg.(T)) })
+				})
+			}
+		})
+	}
+
 	return rt.transport.Subscribe(spec, func(msg any, md Metadata) {
 		// Inactive nodes do not process messages, per the managed-node
 		// design; check on delivery so the mailbox is not filled either.
 		if !nr.active() {
+			if latched {
+				pending.Lock()
+				pending.msg, pending.md, pending.held = msg, md, true
+				pending.Unlock()
+			}
 			return
 		}
 		if frames != nil {

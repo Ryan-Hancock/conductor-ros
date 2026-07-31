@@ -59,6 +59,7 @@ pkill -9 -x mission 2>/dev/null
 pkill -9 -f pyfib_server.py 2>/dev/null
 pkill -9 -x turtlesim 2>/dev/null
 pkill -9 -x turtlesim_node 2>/dev/null
+pkill -9 -x tf2_echo 2>/dev/null
 pkill -9 -x nav2 2>/dev/null
 pkill -9 -x nav2stub 2>/dev/null
 pkill -9 -x moveit 2>/dev/null
@@ -233,7 +234,11 @@ if [[ "$GROUP" == all || "$GROUP" == frames ]]; then
   bg "$WORK/tf_echo.log" ros2 run tf2_ros tf2_echo base_link laser
   tf_echo_pid="$LAST_PID"
   sleep 6
-  kill -9 "$tf_echo_pid" 2>/dev/null
+  { kill -9 "$tf_echo_pid"; wait "$tf_echo_pid"; } 2>/dev/null
+  # `ros2 run` forks the real binary, so killing the wrapper leaves the node on
+  # the graph — nine of them accumulated before discovery grew sharp enough to
+  # notice.
+  pkill -9 -x tf2_echo 2>/dev/null
   check "tf2_echo resolves base_link -> laser" "$WORK/tf_echo.log" "Translation: [0.120, 0.000, 0.190]"
   check "the declared yaw survives the round trip" "$WORK/tf_echo.log" "in RPY (degree) [0.000, -0.000, 180.000]"
 
@@ -241,7 +246,36 @@ if [[ "$GROUP" == all || "$GROUP" == frames ]]; then
   ros2run 20 topic echo --once /amcl_pose >"$WORK/tf_frame.log" 2>&1
   check "frame tag stamps the published header" "$WORK/tf_frame.log" "frame_id: map"
 
-  kill -9 "$frames_pid" 2>/dev/null
+  # Durability: /tf_static is published exactly once, when the node goes active,
+  # and latched. This waits well past any republish interval before asking, so a
+  # reply can only come from the publisher's cache — which is what ROS means by
+  # transient-local, and what conductor used to fake with a 1 Hz repeat.
+  sleep 8
+  ros2run 20 topic echo --once --qos-durability transient_local --qos-reliability reliable \
+    /tf_static >"$WORK/tf_latched.log" 2>&1
+  check "a late subscriber still gets the latched tree" "$WORK/tf_latched.log" "child_frame_id: laser"
+
+  { kill -9 "$frames_pid"; wait "$frames_pid"; } 2>/dev/null
+  sleep 1
+
+  # The other direction: a real ROS latched publisher, and a conductor
+  # subscriber that starts afterwards. Its estop subscription is transient, so a
+  # value published before it existed has to reach it — and that message arrives
+  # while the node is still unconfigured, which is the case that makes latching
+  # more than a transport flag.
+  bg "$WORK/estop_pub.log" ros2 topic pub -r 0.05 \
+    --qos-durability transient_local --qos-reliability reliable \
+    /estop std_msgs/msg/Bool "{data: true}"
+  estop_pub_pid="$LAST_PID"
+  sleep 6
+
+  timeout 12 "$BIN/patrol" -transport zenoh -frames examples/patrol/frames.json \
+    >"$WORK/estop_late.log" 2>&1
+  check "conductor receives a latched message published before it started" \
+    "$WORK/estop_late.log" "estop state changed engaged=true"
+
+  { kill -9 "$estop_pub_pid"; wait "$estop_pub_pid"; } 2>/dev/null
+  pkill -9 -f "topic pub.*estop" 2>/dev/null
   sleep 1
 fi
 

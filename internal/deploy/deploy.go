@@ -315,6 +315,18 @@ func build(app *scan.App, g *graph.Graph, dep gen.Deployment, o Options, stage s
 			return nil, err
 		}
 	}
+	// The robot's semantics ship with it for the same reason: a planning group
+	// the application names is part of the release, not something to install
+	// separately.
+	if app.GroupsFile != "" {
+		src, err := os.ReadFile(filepath.Join(app.Dir, app.GroupsFile))
+		if err != nil {
+			return nil, fmt.Errorf("groups file: %w", err)
+		}
+		if err := write("groups.json", string(src), 0o644); err != nil {
+			return nil, err
+		}
+	}
 	launchBin := path.Join(dep.CurrentDir(), "bin", app.Name)
 	if err := write(app.Name+".launch.xml", gen.LaunchXML(g, launchBin), 0o644); err != nil {
 		return nil, err
@@ -452,6 +464,9 @@ func runtimeFlags(app *scan.App, o Options) []string {
 	}
 	if app.FramesFile != "" {
 		flags = append(flags, "-frames", path.Join(current, "frames.json"))
+	}
+	if app.GroupsFile != "" {
+		flags = append(flags, "-groups", path.Join(current, "groups.json"))
 	}
 	if env.Trace {
 		flags = append(flags, "-trace")

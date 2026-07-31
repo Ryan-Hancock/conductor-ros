@@ -31,6 +31,10 @@ type runtimeState struct {
 	// this process that publishes it on tf_static, if any.
 	frames      *FrameTree
 	tfPublisher string
+
+	// semantics are the declared planning groups (groups.json, derived from an
+	// SRDF), against which conductor.Group fields are resolved.
+	semantics *Semantics
 }
 
 // binder is implemented by the framework field types (Sub, Pub, Param, Timer);
@@ -63,6 +67,7 @@ func Run(nodes ...any) {
 	dashAddr := fs.String("dashboard", "", "serve the live dashboard on this address (e.g. :4000)")
 	dashTraces := fs.Int("dashboard-traces", 0, "record this many recent spans for the dashboard's trace view (implies tracing)")
 	framesFile := fs.String("frames", "frames.json", "transform tree to publish and look up (see frames.json)")
+	groupsFile := fs.String("groups", "groups.json", "planning groups to resolve conductor.Group fields against")
 	var paramFiles stringList
 	fs.Var(&paramFiles, "params", "parameter file to load (repeatable; later files win)")
 	env := fs.String("env", "", "environment name: also loads params.<env>.yaml next to the last -params file, or ./params.<env>.yaml")
@@ -98,6 +103,24 @@ func Run(nodes ...any) {
 			"frames", len(frames.Frames()))
 	}
 
+	// Planning groups are resolved the same way the transform tree is: found
+	// beside the binary as well as in the working directory, because a
+	// deployed unit runs from neither reliably.
+	groupsPath, err := findFramesFile(*groupsFile, explicitlySet(fs, "groups"))
+	if err != nil {
+		slog.Error("conductor: planning groups", "err", err)
+		os.Exit(1)
+	}
+	semantics, err := LoadSemantics(groupsPath)
+	if err != nil {
+		slog.Error("conductor: loading planning groups", "err", err)
+		os.Exit(1)
+	}
+	if semantics != nil {
+		slog.Info("conductor: loaded planning groups", "file", groupsPath,
+			"groups", strings.Join(semantics.Names(), ","))
+	}
+
 	if *traceLog {
 		AddExporter(LogExporter{})
 	}
@@ -107,7 +130,14 @@ func Run(nodes ...any) {
 		os.Exit(1)
 	}
 
-	a, err := newAppWithParams(*transportName, TransportOptions{Endpoint: *endpoint, Domain: *domain}, *only, values, frames, nodes...)
+	a, err := newAppOpts(appOptions{
+		transport: *transportName,
+		topts:     TransportOptions{Endpoint: *endpoint, Domain: *domain},
+		only:      *only,
+		params:    values,
+		frames:    frames,
+		semantics: semantics,
+	}, nodes...)
 	if err != nil {
 		slog.Error("conductor: startup failed", "err", err)
 		os.Exit(1)
@@ -281,6 +311,7 @@ type appOptions struct {
 	params       map[string]map[string]string // node -> parameter -> raw value
 	manualTimers bool                         // do not start tickers; fire timers explicitly
 	frames       *FrameTree                   // declared transform tree, if any
+	semantics    *Semantics                   // declared planning groups, if any
 }
 
 func newApp(transportName string, topts TransportOptions, only string, nodeStructs ...any) (*app, error) {
@@ -296,7 +327,7 @@ func newAppOpts(o appOptions, nodeStructs ...any) (*app, error) {
 	if err != nil {
 		return nil, err
 	}
-	rt := &runtimeState{transport: tr, paramValues: o.params, frames: o.frames}
+	rt := &runtimeState{transport: tr, paramValues: o.params, frames: o.frames, semantics: o.semantics}
 	for _, ns := range nodeStructs {
 		ptr := reflect.ValueOf(ns)
 		if ptr.Kind() != reflect.Pointer || ptr.Elem().Kind() != reflect.Struct {

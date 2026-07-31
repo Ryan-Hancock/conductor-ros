@@ -1,0 +1,10 @@
+{
+  "app": "moveitstub",
+  "externals": [
+    {
+      "topic": "move_action",
+      "type": "moveit_msgs/action/MoveGroup",
+      "role": "action_client"
+    }
+  ]
+}

@@ -1,0 +1,116 @@
+{
+  "groups": [
+    {
+      "name": "panda_arm",
+      "base_link": "panda_link0",
+      "tip_link": "panda_link8",
+      "states": [
+        {
+          "name": "ready",
+          "joints": [
+            "panda_joint1",
+            "panda_joint2",
+            "panda_joint3",
+            "panda_joint4",
+            "panda_joint5",
+            "panda_joint6",
+            "panda_joint7"
+          ],
+          "positions": [
+            0,
+            -0.785,
+            0,
+            -2.356,
+            0,
+            1.571,
+            0.785
+          ]
+        },
+        {
+          "name": "extended",
+          "joints": [
+            "panda_joint1",
+            "panda_joint2",
+            "panda_joint3",
+            "panda_joint4",
+            "panda_joint5",
+            "panda_joint6",
+            "panda_joint7"
+          ],
+          "positions": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            1.571,
+            0.785
+          ]
+        },
+        {
+          "name": "transport",
+          "joints": [
+            "panda_joint1",
+            "panda_joint2",
+            "panda_joint3",
+            "panda_joint4",
+            "panda_joint5",
+            "panda_joint6",
+            "panda_joint7"
+          ],
+          "positions": [
+            0,
+            -0.5599,
+            0,
+            -2.97,
+            0,
+            0,
+            0.785
+          ]
+        }
+      ]
+    },
+    {
+      "name": "hand",
+      "links": [
+        "panda_hand",
+        "panda_leftfinger",
+        "panda_rightfinger"
+      ],
+      "joints": [
+        "panda_finger_joint1"
+      ],
+      "states": [
+        {
+          "name": "open",
+          "joints": [
+            "panda_finger_joint1",
+            "panda_finger_joint2"
+          ],
+          "positions": [
+            0.035,
+            0.035
+          ]
+        },
+        {
+          "name": "close",
+          "joints": [
+            "panda_finger_joint1",
+            "panda_finger_joint2"
+          ],
+          "positions": [
+            0,
+            0
+          ]
+        }
+      ]
+    },
+    {
+      "name": "panda_arm_hand",
+      "subgroups": [
+        "panda_arm",
+        "hand"
+      ]
+    }
+  ]
+}

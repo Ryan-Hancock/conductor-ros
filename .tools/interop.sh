@@ -8,7 +8,7 @@
 #   ./.tools/interop.sh            run every leg
 #   ./.tools/interop.sh services   one group
 #                                  (services | actions | lifecycle | params |
-#                                   frames | nav2 | turtlesim)
+#                                   frames | nav2 | moveit | turtlesim)
 #
 # Requires a ROS 2 install plus the user-space rmw_zenoh overlay in .tools
 # (see env.sh). Starts and stops its own zenoh router.
@@ -61,6 +61,8 @@ pkill -9 -x turtlesim 2>/dev/null
 pkill -9 -x turtlesim_node 2>/dev/null
 pkill -9 -x nav2 2>/dev/null
 pkill -9 -x nav2stub 2>/dev/null
+pkill -9 -x moveit 2>/dev/null
+pkill -9 -x moveitstub 2>/dev/null
 pkill -9 -x rmw_zenohd 2>/dev/null
 sleep 1
 
@@ -72,6 +74,8 @@ go build -tags zenoh -o "$BIN/turtlesim" ./examples/turtlesim
 go build -tags zenoh -o "$BIN/nav2" ./examples/nav2
 go build -tags zenoh -o "$BIN/nav2stub" ./examples/nav2stub
 go build -tags zenoh -o "$BIN/conductor" ./cmd/conductor
+go build -tags zenoh -o "$BIN/moveit" ./examples/moveit
+go build -tags zenoh -o "$BIN/moveitstub" ./examples/moveitstub
 
 echo "starting zenoh router..."
 bg "$WORK/router.log" "$CONDUCTOR_OVERLAY/lib/rmw_zenoh_cpp/rmw_zenohd"
@@ -369,6 +373,37 @@ YAML
 
   { kill -9 "$stub_pid"; wait "$stub_pid"; } 2>/dev/null
   pkill -9 -x nav2stub 2>/dev/null
+  sleep 1
+fi
+
+if [[ "$GROUP" == all || "$GROUP" == moveit ]]; then
+  echo "moveit:"
+  # moveit_msgs is NOT installed here: these definitions are vendored upstream
+  # text, hashed locally. So the question is whether the rest of ROS sees the
+  # same action a real move_group offers — and whether the largest nested
+  # message in common use survives the wire, which is what the application
+  # driving it proves.
+  bg "$WORK/moveitstub.log" "$BIN/moveitstub" -transport zenoh
+  moveit_stub_pid="$LAST_PID"
+  sleep 4
+
+  ros2run 25 action list -t >"$WORK/moveit_actions.log" 2>&1
+  check "move_group advertises moveit_msgs/action/MoveGroup" \
+    "$WORK/moveit_actions.log" "/move_action [moveit_msgs/action/MoveGroup]"
+
+  # The application: every planning request carries a MotionPlanRequest, whose
+  # goal constraints come from the robot's SRDF.
+  timeout 90 "$BIN/moveit" -transport zenoh -groups examples/moveit/groups.json \
+    >"$WORK/moveit_app.log" 2>&1
+  check "conductor plans against a real action server" "$WORK/moveit_app.log" "plan executed"
+  check "the mission completes the job" "$WORK/moveit_app.log" "job complete"
+  check "a failed plan takes the recovery branch" "$WORK/moveit_app.log" "returning to a known configuration"
+  # The stand-in echoes the group it was asked to plan for, which is the name
+  # the SRDF declares and the checker resolved.
+  check "the planning group reaches move_group" "$WORK/moveitstub.log" "group=panda_arm"
+
+  { kill -9 "$moveit_stub_pid"; wait "$moveit_stub_pid"; } 2>/dev/null
+  pkill -9 -x moveitstub 2>/dev/null
   sleep 1
 fi
 

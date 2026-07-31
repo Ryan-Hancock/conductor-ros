@@ -117,3 +117,40 @@ func TestUnmarshalTruncated(t *testing.T) {
 		t.Fatal("expected short-header error")
 	}
 }
+
+// ROS time zero means "not stamped": that is what the encoder writes for a zero
+// time.Time, and what the decoder has to read back as one. The asymmetry this
+// replaces made Stamp.IsZero() false for every unstamped message received —
+// which is the question application code asks, and the one conductor's own
+// frame stamping answers with.
+func TestZeroTimeRoundTrips(t *testing.T) {
+	type stamped struct {
+		Stamp time.Time
+		Note  string
+	}
+	for _, tc := range []struct {
+		name string
+		in   time.Time
+	}{
+		{"unstamped", time.Time{}},
+		{"stamped", time.Unix(1785000000, 123456789)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			b, err := Marshal(stamped{Stamp: tc.in, Note: "x"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var got stamped
+			if err := Unmarshal(b, &got); err != nil {
+				t.Fatal(err)
+			}
+			if !got.Stamp.Equal(tc.in) {
+				t.Errorf("stamp = %v, want %v", got.Stamp, tc.in)
+			}
+			if got.Stamp.IsZero() != tc.in.IsZero() {
+				t.Errorf("IsZero() = %v, want %v: an unstamped message must stay unstamped",
+					got.Stamp.IsZero(), tc.in.IsZero())
+			}
+		})
+	}
+}

@@ -1,6 +1,6 @@
 # Conductor — Design
 
-*Status: v1.7 — static toolchain + pluggable-transport runtime, an
+*Status: v1.8 — static toolchain + pluggable-transport runtime, an
 rmw_zenoh transport verified against live ROS 2 (Lyrical) traffic,
 `.msg`/`.srv`/`.action`-to-Go codegen with local REP-2011 hash computation,
 lifecycle, parameters, observability with a built-in dashboard, an in-process
@@ -11,8 +11,9 @@ one graph, a worked Nav2 example that drives a real navigation stack through
 its lifecycle, its recovery behaviours and its actions, discovery that
 derives the externals block from a live graph rather than trusting a hand
 transcription of it, a lifecycle client that brings somebody else's managed
-stack up in a declared order, and a transform tree derived from the robot's own
-URDF rather than transcribed beside it. This document records the vision, the
+stack up in a declared order, a transform tree derived from the robot's own
+URDF rather than transcribed beside it, and a MoveIt example whose planning
+groups come from the robot's SRDF. This document records the vision, the
 architecture, and the decisions still open.*
 
 ## Thesis
@@ -121,6 +122,8 @@ declarations, so they cannot drift.
 | CND060 | error | `conductor.Lifecycle` node list is empty, or names one twice, or is not a node name |
 | CND061 | warn  | a lifecycle client manages one of this application's own nodes |
 | CND062 | error | invalid `timeout` on a lifecycle client |
+| CND070 | error | `conductor.Group` names a planning group the robot's semantics do not declare |
+| CND071 | error | a literal `Group.State` names a configuration that group does not have |
 
 ## The transport decision (RESOLVED: Zenoh-native, shipped in v0.2)
 
@@ -200,10 +203,10 @@ consolidation explicitly, with a comment) are the exact places bugs hide.
 | TF conventions | `static_transform_publisher` in a launch file | `frames.json` published on tf_static, `TF.Lookup` composition, `frame:` tags that stamp and check headers, tree checked at build time | ✅ v1.2 |
 | Driving Nav2 | hand-written action clients, `wait_for_service` loops, a behaviour tree XML for the sequencing, `lifecycle_manager` for the startup | `examples/nav2`: the stack's startup is a mission step, recovery is a `fail:` branch onto Nav2's own behaviours, docking is a checked `Goto`; upstream `nav2_msgs` definitions so the hashes are Nav2's; a stand-in stack so it runs without one | ✅ v1.4 |
 | Externals of someone else's graph | hand-transcribed from source | `conductor externals`: read the liveliness graph, roll actions up, derive the block, and diff it against what is declared (`-check` in CI, `-write` to update) | ✅ v1.5 |
-| Driving MoveIt | as above, plus planning-group magic strings | the same treatment as Nav2; the largest nested messages in common use, so also a CDR/msggen stress test | v1.7 |
+| Driving MoveIt | as above, plus planning-group magic strings | `examples/moveit`: pick and place as a mission over `move_action`, planning groups and named configurations declared from the robot's SRDF and checked (CND070–071); 30 vendored definitions across three packages, and the deepest message in ROS round-tripped through the codec | ✅ v1.8 |
 | Bringing a managed stack up | `lifecycle_manager` + `autostart`, ordering in a launch file | `conductor.Lifecycle`: the list of managed nodes is a declaration, `BringUp` configures then activates it in order, teardown runs it in reverse, and the checker validates the list while `conductor externals` verifies the names against a live graph | ✅ v1.6 |
 | Robot description | URDF + xacro, constants duplicated into code and launch files | `conductor frames -from robot.urdf`: fixed joints become the tree's fixed transforms, movable ones the dynamic links a robot_state_publisher provides, and the frame checks then apply to the robot's real description | ✅ v1.7 |
-| Robot description, the rest | SRDF planning groups and named poses as magic strings; `/robot_description` read by every tool | SRDF groups declared and checked like frames; `/robot_description` published (needs transient-local) | v1.8 |
+| Robot description, the rest | `/robot_description` read by every tool | published by conductor (needs transient-local durability) | v1.9 |
 | Simulation | `use_sim_time` folklore, hand-written spawn scripts | the simulator is a declared `requires`; a clock source behind `Timer` and header stamping so sim time is the same code path as wall time | v1.7 |
 
 ## Observability (v0.8, implemented)
@@ -740,36 +743,75 @@ strings in a MoveIt-driving application, and they want declaring and checking
 exactly as frames now are — but the value of that shows up with the MoveIt
 example, not before it.
 
-## What comes next (v1.8 and beyond)
+## Driving MoveIt (v1.8, implemented)
+
+The Nav2 example tested the thesis against a stack with its own lifecycle. This
+one tests it against a stack with its own *vocabulary*: MoveIt's interfaces are
+the largest nested messages in common ROS use, and a MoveIt-driving application
+is written in strings — the planning group's name, the named pose's name, and
+the joint values of that pose copied in beside them.
+
+**Planning groups become declarations.** `conductor.Group` names a group from
+the robot's SRDF, and `State("ready")` returns the joint names and values the
+SRDF gives it, so the application contains no angles at all. `conductor groups
+-from robot.srdf` derives the file, exactly as `conductor frames` derives the
+transform tree, and the checker resolves both halves: a group the robot does not
+declare (CND070) and a configuration the group does not have (CND071), the
+latter for literals written at the `State` call. The scanner is syntactic, so
+that is where a literal has to be — the same rule `Task.Goto` and `TF.Lookup`
+already follow, and the example is written to respect it rather than hiding the
+string behind a helper.
+
+**Vendoring found a real gap.** `moveit_msgs` is not installed here, and
+`MoveGroup`'s transitive dependencies are 30 definitions spanning three
+packages — `moveit_msgs`, `octomap_msgs`, `object_recognition_msgs`. msggen
+could not express that: `-ros-pkg` names one package for every local file, which
+was enough for Nav2 (all `nav2_msgs`) and not for this. The fix is the layout
+ROS already uses: `-share <dir>` adds a directory laid out as a share tree
+(`<dir>/<pkg>/msg/Name.msg`), resolved by package name exactly as an installed
+distro is, with vendored definitions winning over installed ones. The set itself
+was discovered by running msggen and fetching whatever it said was missing,
+which is a tighter loop than reading someone's CMakeLists — and a decent test of
+the error messages.
+
+**The codec's stress test found a real bug.** A fully populated MoveGroup goal —
+arrays of structs, arrays of arrays, fixed-size arrays, signed blobs, strings,
+times, durations, 3.5 KB encoded — round-trips exactly, but only after fixing
+this: a zero `time.Time` encoded to ROS time zero (right: that is what ROS means
+by "not stamped") and decoded back as `time.Unix(0, 0)` (wrong), so
+`Stamp.IsZero()` was false for every unstamped message a conductor application
+received. That is the question application code actually asks, and conductor's
+own frame stamping asks it. The asymmetry is fixed in the codec, with a test.
+
+The example ships with a stand-in move_group for the same reason the Nav2 one
+does — a MoveIt install is a large thing to ask of a reader — and it fails on
+purpose, so the recovery branch is exercised by `make moveit` rather than only
+by `go test`. Getting that to terminate took two goes: with a failure every
+fifth request and a seven-step cycle, the periods resonated and the job never
+finished, which is a fair miniature of why a robot that "usually works" can loop
+forever in the field.
+
+## What comes next (v1.9 and beyond)
 
 The pattern so far is that each milestone took something ROS leaves as
 folklore and made it a declaration the toolchain can read. What follows is
 the same exercise applied to the places a conductor application still meets
 the ecosystem by hand.
 
-### The next big stack
-
-**A MoveIt example** is the harder one, and useful for a second reason: its
-interfaces (`moveit_msgs/action/MoveGroup`, the planning scene, joint
-trajectories) are the largest nested messages in common use, so it is a real
-stress test of the CDR codec and of msggen on deeply nested arrays. The
-manipulation logic itself — pick, move, place, recover — is a mission, and
-planning group names are magic strings today, which is what the SRDF work
-below would fix.
-
 ### The robot description: what is left
 
-The transform tree is derived from the URDF (above). Two related pieces are not.
+The transform tree comes from the URDF and the planning groups from the SRDF
+(above). What is left of a robot description is publishing it.
 
 Tools find a robot's model on **`/robot_description`**, a transient-local topic
 — which is a second dependent for the latching gap below, and an argument for
 closing it. Publishing the description conductor already parses would make a
 conductor-only robot legible to rviz and to anything else that expects it.
 
-And **SRDF** names planning groups, named poses and disabled collision pairs; a
-MoveIt-driving application refers to those by string today, and they could be
-declared and checked exactly as frames now are. That work belongs with the MoveIt
-example, which is what would give it a reason to exist.
+The SRDF's **disabled collision pairs** are also read by nobody here yet. They
+are the largest part of that file and the least useful to an orchestrator: they
+matter to the planner, which is not conductor's job. Worth revisiting only if a
+checkable claim turns up that depends on them.
 
 ### Simulation and time
 

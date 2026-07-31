@@ -13,6 +13,7 @@
 //	conductor dashboard     serve the fleet view over a deployment's processes
 //	conductor externals     derive conductor.json's externals from a live graph
 //	conductor frames        derive frames.json from a robot description (URDF)
+//	conductor groups        derive groups.json from a robot's semantics (SRDF)
 package main
 
 import (
@@ -54,6 +55,8 @@ func main() {
 		err = runExternals(os.Args[2:])
 	case "frames":
 		err = runFrames(os.Args[2:])
+	case "groups":
+		err = runGroups(os.Args[2:])
 	case "msggen":
 		err = runMsggen(os.Args[2:])
 	default:
@@ -118,7 +121,10 @@ func usage() {
                                         application publishes them itself
                             -fixed-only leave out movable joints (nothing
                                         publishes joint state on this robot)
-  conductor msggen -out <dir> [-pkg <gopkg>] [-ros-pkg <pkg>] <target...>
+  conductor groups -from <robot.srdf> [-o groups.json]
+                          derive the planning groups (and their named joint
+                          configurations) from a robot's semantics
+  conductor msggen -out <dir> [-pkg <gopkg>] [-ros-pkg <pkg>] [-share <dir>] <target...>
                           generate Go message types (with computed RIHS01
                           hashes) from .msg definitions; targets are ROS
                           interface names (geometry_msgs/msg/Twist, resolved
@@ -184,6 +190,30 @@ func resolveRobot(dir, env, robot string) (*scan.App, error) {
 	return app.ResolveRobot(env, robot)
 }
 
+// groupSummary describes a planning group from the robot's semantics: what it
+// covers and what configurations it names.
+func groupSummary(app *scan.App, name string) string {
+	group, ok := app.Semantics.Group(name)
+	if !ok {
+		return "(not in " + orDash(app.GroupsFile) + ")"
+	}
+	states := make([]string, len(group.States))
+	for i, s := range group.States {
+		states[i] = s.Name
+	}
+	what := fmt.Sprintf("%d joint(s)", len(group.Joints))
+	if group.TipLink != "" {
+		what = fmt.Sprintf("chain %s -> %s", group.BaseLink, group.TipLink)
+	}
+	if len(group.Subgroups) > 0 {
+		what = "subgroups " + strings.Join(group.Subgroups, ", ")
+	}
+	if len(states) > 0 {
+		what += "; states: " + strings.Join(states, ", ")
+	}
+	return what
+}
+
 func printReport(app *scan.App, g *graph.Graph, issues []graph.Issue) {
 	env := ""
 	if app.Env != nil {
@@ -227,6 +257,9 @@ func printReport(app *scan.App, g *graph.Graph, issues []graph.Issue) {
 				def = "(no default)"
 			}
 			fmt.Printf("    param %s %s = %s\n", p.Name, p.GoType, def)
+		}
+		for _, g := range n.Groups {
+			fmt.Printf("    group %-14s %s\n", g.Name, groupSummary(app, g.Name))
 		}
 		for _, l := range n.Lifecycle {
 			fmt.Printf("    manage %s (%d node(s), in bringup order)\n",

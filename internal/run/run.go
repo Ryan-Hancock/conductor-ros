@@ -362,6 +362,9 @@ func Flags(app *scan.App) []string {
 	if app.FramesFile != "" {
 		flags = append(flags, "-frames", filepath.Join(app.Dir, app.FramesFile))
 	}
+	if app.GroupsFile != "" {
+		flags = append(flags, "-groups", filepath.Join(app.Dir, app.GroupsFile))
+	}
 	if env.Metrics != "" {
 		flags = append(flags, "-metrics-addr", env.Metrics)
 	}

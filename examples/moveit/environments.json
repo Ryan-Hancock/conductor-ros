@@ -1,0 +1,41 @@
+{
+  "default": "stub",
+  "environments": {
+    "stub": {
+      "transport": "zenoh",
+      "endpoint": "tcp/127.0.0.1:7447",
+      "deploy": {"tags": ["zenoh"], "cgo": true},
+      "requires": [
+        {
+          "name": "router",
+          "run": "$CONDUCTOR_OVERLAY/lib/rmw_zenoh_cpp/rmw_zenohd",
+          "ready": {"endpoint": "tcp/127.0.0.1:7447"}
+        },
+        {
+          "name": "move_group",
+          "run": "go run -tags zenoh ../moveitstub -transport zenoh -zenoh-endpoint tcp/127.0.0.1:7447 -dashboard 127.0.0.1:4910",
+          "ready": {"endpoint": "127.0.0.1:4910"},
+          "ready_timeout": "90s"
+        }
+      ]
+    },
+    "real": {
+      "transport": "zenoh",
+      "endpoint": "tcp/127.0.0.1:7447",
+      "deploy": {"tags": ["zenoh"], "cgo": true},
+      "requires": [
+        {
+          "name": "router",
+          "run": "$CONDUCTOR_OVERLAY/lib/rmw_zenoh_cpp/rmw_zenohd",
+          "ready": {"endpoint": "tcp/127.0.0.1:7447"}
+        },
+        {
+          "name": "move_group",
+          "run": "ros2 launch moveit_resources_panda_moveit_config demo.launch.py",
+          "ready": {"command": "ros2 action list | grep -q /move_action"},
+          "ready_timeout": "180s"
+        }
+      ]
+    }
+  }
+}

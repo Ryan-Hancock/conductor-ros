@@ -15,6 +15,9 @@ func runMsggen(args []string) error {
 	out := fs.String("out", "", "output directory (required)")
 	goPkg := fs.String("pkg", "", "Go package name (default: basename of -out)")
 	rosPkg := fs.String("ros-pkg", "", "ROS package name for local .msg file/dir targets")
+	var share stringList
+	fs.Var(&share, "share", "a directory laid out like a ROS share tree "+
+		"(<dir>/<pkg>/msg/Name.msg), searched before $AMENT_PREFIX_PATH (repeatable)")
 	fs.Parse(args)
 	if *out == "" || fs.NArg() == 0 {
 		return fmt.Errorf("msggen: -out and at least one target are required (see conductor -h)")
@@ -23,7 +26,12 @@ func runMsggen(args []string) error {
 		*goPkg = filepath.Base(*out)
 	}
 
-	r := msggen.NewResolver(msggen.SharePrefixesFromEnv(os.Getenv("AMENT_PREFIX_PATH")))
+	// Vendored definitions come first: an interface package that is not
+	// installed is exactly why they are vendored, and one that *is* installed
+	// should not silently win over the copy the application was built against.
+	prefixes := append([]string{}, share...)
+	prefixes = append(prefixes, msggen.SharePrefixesFromEnv(os.Getenv("AMENT_PREFIX_PATH"))...)
+	r := msggen.NewResolver(prefixes)
 	var targets []string
 	for _, arg := range fs.Args() {
 		switch {

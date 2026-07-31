@@ -47,3 +47,22 @@ func resolveFrames(app *App, env *Environment, out *App) error {
 	out.Frames, out.FramesFile = tree, env.Frames
 	return nil
 }
+
+// loadGroups reads the planning groups the same way frames are read: derived
+// from the robot's SRDF by `conductor groups`, beside conductor.json, through
+// the loader the runtime uses.
+func loadGroups(dir, name string, app *App) error {
+	if name == "" {
+		name = "groups.json"
+	}
+	path := filepath.Join(dir, name)
+	semantics, err := conductor.LoadSemantics(path)
+	if err != nil {
+		return err
+	}
+	app.Semantics = semantics
+	if semantics != nil {
+		app.GroupsFile = name
+	}
+	return nil
+}

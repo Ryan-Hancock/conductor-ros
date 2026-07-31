@@ -24,6 +24,7 @@ const (
 	EndpointMission      EndpointKind = "mission"
 	EndpointTF           EndpointKind = "transforms"
 	EndpointLifecycle    EndpointKind = "lifecycle client"
+	EndpointGroup        EndpointKind = "planning group"
 )
 
 // Endpoint describes one wired declaration.

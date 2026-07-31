@@ -44,6 +44,11 @@ type App struct {
 	Frames     *conductor.FrameTree
 	FramesFile string
 
+	// Semantics are the declared planning groups (groups.json, derived from
+	// the robot's SRDF); nil when the app declares none.
+	Semantics  *conductor.Semantics
+	GroupsFile string
+
 	// Environments are declared in environments.json (see environments.go).
 	// Env is the one this App has been resolved for, nil until Resolve.
 	Environments map[string]*Environment
@@ -72,10 +77,12 @@ type Node struct {
 	Steps         []Step
 	TF            *TFDecl
 	Lifecycle     []LifecycleDecl // conductor.Lifecycle fields: stacks this node manages
+	Groups        []GroupDecl     // conductor.Group fields: planning groups this node plans for
 	// Methods maps method name to its signature shape for handler checks.
 	Methods map[string]MethodSig
 	// Calls are conductor calls made with string literals inside this node's
-	// methods — Task.Goto("recharge"), TF.Lookup("base_link", "laser") — so
+	// methods — Task.Goto("recharge"), TF.Lookup("base_link", "laser"),
+	// Group.State("ready") — so
 	// the checker can hold code to the same declarations the tags are held to.
 	Calls []Call
 }
@@ -115,6 +122,15 @@ type Call struct {
 // TFDecl is a node's conductor.TF field: its access to the declared frames.
 type TFDecl struct {
 	Field string
+	File  string
+	Line  int
+}
+
+// GroupDecl is a conductor.Group field: a planning group named in the robot's
+// SRDF, which the checker resolves against the derived groups.json.
+type GroupDecl struct {
+	Field string
+	Name  string
 	File  string
 	Line  int
 }
@@ -229,6 +245,9 @@ func ScanApp(dir string) (*App, error) {
 		return nil, err
 	}
 	if err := loadFrames(abs, "frames.json", app); err != nil {
+		return nil, err
+	}
+	if err := loadGroups(abs, "groups.json", app); err != nil {
 		return nil, err
 	}
 
@@ -480,6 +499,10 @@ func addField(n *Node, pkg string, field *ast.Field, path string, fset *token.Fi
 		})
 	case "TF":
 		n.TF = &TFDecl{Field: fname, File: path, Line: line}
+	case "Group":
+		n.Groups = append(n.Groups, GroupDecl{
+			Field: fname, Name: tag.Get("group"), File: path, Line: line,
+		})
 	case "Lifecycle":
 		n.Lifecycle = append(n.Lifecycle, LifecycleDecl{
 			Field:   fname,
@@ -530,7 +553,7 @@ func conductorField(e ast.Expr) (kind string, args []string) {
 			return "", nil
 		}
 		switch x.Sel.Name {
-		case "Timer", "Mission", "Step", "TF", "Lifecycle":
+		case "Timer", "Mission", "Step", "TF", "Lifecycle", "Group":
 			return x.Sel.Name, []string{""}
 		}
 	}
@@ -608,7 +631,7 @@ func literalCalls(path string, fd *ast.FuncDecl, fset *token.FileSet) []Call {
 			return true
 		}
 		switch sel.Sel.Name {
-		case "Goto", "Lookup":
+		case "Goto", "Lookup", "State":
 		default:
 			return true
 		}

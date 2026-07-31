@@ -228,6 +228,15 @@ func (d *decoder) value(v reflect.Value) error {
 		if err != nil {
 			return err
 		}
+		// ROS time zero means "not stamped", which is why the encoder writes it
+		// for a zero time.Time. Decoding it back to time.Unix(0, 0) would break
+		// that symmetry and, worse, make Stamp.IsZero() false for every
+		// unstamped message received — the question application code actually
+		// asks. A stamp of exactly the epoch carries no other meaning in ROS.
+		if sec == 0 && nsec == 0 {
+			v.Set(reflect.ValueOf(time.Time{}))
+			return nil
+		}
 		v.Set(reflect.ValueOf(time.Unix(int64(int32(sec)), int64(nsec))))
 		return nil
 	case durationType:

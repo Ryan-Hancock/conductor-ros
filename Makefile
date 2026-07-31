@@ -13,7 +13,7 @@ SHELL := /bin/bash
 .SHELLFLAGS := -o pipefail -c
 
 ENV      := .tools/env.sh
-EXAMPLES := chatter patrol fibonacci mission turtlesim nav2 nav2stub
+EXAMPLES := chatter patrol fibonacci mission turtlesim nav2 nav2stub moveit moveitstub
 CLI      := go run ./cmd/conductor
 # ROS setup.bash reads unset variables, so env.sh must not run under `set -u`.
 WITHROS   = source $(ENV) &&
@@ -90,6 +90,7 @@ fleet: ## (ROS) run examples/patrol as one process per node, behind the fleet vi
 frames: ## re-derive both examples' frames.json from their robot descriptions
 	$(CLI) frames -from examples/nav2/turtlebot3_waffle.urdf -o examples/nav2/frames.json
 	$(CLI) frames -from examples/patrol/patrol.urdf -o examples/patrol/frames.json -publish -fixed-only
+	$(CLI) groups -from examples/moveit/panda.srdf -o examples/moveit/groups.json
 
 .PHONY: externals
 externals: ## (ROS) read the running graph and compare it with examples/nav2's externals
@@ -106,6 +107,10 @@ mission: ## (ROS) run the declarative mission example against the Go action serv
 .PHONY: nav2
 nav2: ## (ROS) run the Nav2 patrol against the stand-in stack (no Nav2 install needed)
 	@$(WITHROS) $(CLI) run examples/nav2
+
+.PHONY: moveit
+moveit: ## (ROS) run the pick-and-place against the stand-in move_group
+	@$(WITHROS) $(CLI) run examples/moveit
 
 .PHONY: nav2-sim
 nav2-sim: ## (ROS) the same application against a real nav2_bringup in Gazebo

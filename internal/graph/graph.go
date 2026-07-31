@@ -285,6 +285,7 @@ func Validate(app *scan.App) (*Graph, []Issue) {
 	validateMissions(add, app)
 	validateFrames(add, app)
 	validateLifecycle(add, app)
+	validateGroups(add, app)
 
 	for _, e := range app.Externals {
 		switch e.Role {

@@ -112,6 +112,7 @@ make turtlesim  # the tutorial below, router and turtlesim_node included
 | `conductor.TF` and `frame:"base_link"` on a Sub/Pub | Declared transform tree (`frames.json`); stamps and checks frame ids |
 | `conductor.Lifecycle` + `.BringUp(ctx)` | Drive other managed nodes (`nodes:"a,b,c"`, in bringup order) |
 | `robot.urdf` | Robot description; `conductor frames -from` derives `frames.json` from it |
+| `conductor.Group` + `.State("ready")` | Planning group from the robot's SRDF (`group:"panda_arm"`), with its named joint configurations |
 | `//ros:type pkg/msg/Name` on a struct | Maps a Go message type to its ROS interface |
 | `conductor.json` | App name + topics provided/consumed by external ROS nodes |
 
@@ -1185,6 +1186,110 @@ Active. What is checked, and where:
   node with no `change_state` service is reported, along with the managed nodes
   that *are* there.
 
+## Driving MoveIt
+
+[examples/moveit](examples/moveit/commander.go) is the manipulation half of the
+same claim [examples/nav2](examples/nav2/commander.go) makes for navigation: the
+planning, the kinematics and the collision checking stay in MoveIt, and what
+conductor takes over is deciding what to plan next and what to do when a plan
+fails.
+
+```go
+//conductor:node
+type Commander struct {
+    Move conductor.ActionClient[MoveGroupGoal, MoveGroupFeedback, MoveGroupResult] `action:"move_action" timeout:"120s"`
+
+    Arm  conductor.Group `group:"panda_arm"`
+    Hand conductor.Group `group:"hand"`
+
+    Job     conductor.Mission `start:"ready"`
+    Ready   conductor.Step    `next:"reach" retry:"2" backoff:"1s" fail:"give_up"`
+    Reach   conductor.Step    `next:"grasp" fail:"recover"`
+    Grasp   conductor.Step    `next:"lift"  fail:"recover"`
+    Lift    conductor.Step    `next:"place" fail:"recover"`
+    Place   conductor.Step    `next:"release" fail:"recover"`
+    Release conductor.Step    `next:"home"  fail:"recover"`
+    Home    conductor.Step    `next:"done"  fail:"recover"`
+    Recover conductor.Step    `next:"ready" retry:"1" fail:"give_up"`
+    GiveUp  conductor.Step    `next:"failed"`
+}
+```
+
+### Planning groups are declarations, not strings
+
+A MoveIt-driving application names its planning groups as strings and copies the
+joint values of its named poses out of the SRDF into the code beside them. Both
+are the problem this framework exists to remove: a name nothing checks, and
+numbers duplicated from a file that already holds them.
+
+```sh
+conductor groups -from examples/moveit/panda.srdf -o examples/moveit/groups.json
+```
+
+```
+panda: 3 planning group(s)
+  panda_arm        chain panda_link0 -> panda_link8; states: ready, extended, transport
+  hand             1 joint(s); states: open, close
+  panda_arm_hand   subgroups panda_arm, hand
+```
+
+Then `c.Arm.State("ready")` returns the seven joint names and values the SRDF
+gives them, and `conductor check` resolves both halves against the robot:
+
+```
+error CND070: node commander: planning group "panda_manipulator" is not in
+      groups.json (it declares: hand, panda_arm, panda_arm_hand) (commander.go:32)
+error CND071: node commander: c.Arm.State("stowed") in OnRecover: planning group
+      "panda_arm" has no such configuration in groups.json (it has: ready,
+      extended, transport) (commander.go:138)
+```
+
+The literal has to be at the `State` call for the checker to see it — the
+scanner is syntactic, so it holds strings to declarations exactly where they are
+written, the same rule `Task.Goto` and `TF.Lookup` follow.
+
+### The interfaces, and what they cost
+
+`moveit_msgs/action/MoveGroup` is the largest nested message in common ROS use,
+and `moveit_msgs` is not installed here. Its transitive dependency set —
+**30 definitions across three packages**, including `octomap_msgs` and
+`object_recognition_msgs` — was vendored by running `conductor msggen` and
+fetching whatever it said was missing, which is a tighter loop than reading the
+package's CMakeLists:
+
+```sh
+conductor msggen -out examples/moveit -pkg main     -share examples/moveit/interfaces moveit_msgs/action/MoveGroup   # 56 Go types
+```
+
+`-share` is what made a multi-package vendored tree possible at all: the
+directory is laid out the way ROS lays out a share tree
+(`<dir>/<pkg>/msg/Name.msg`), so resolution works by package name exactly as it
+does for an installed distro, and vendored definitions win over installed ones.
+
+That message is also the codec's stress test — arrays of structs, arrays of
+arrays, fixed-size arrays, signed blobs, strings, times and durations, 3.5 KB
+encoded — and it found a real bug: a zero `time.Time` encoded to ROS time zero
+but decoded back as `time.Unix(0, 0)`, so `Stamp.IsZero()` was false for every
+unstamped message received. Fixed, with a test in [cdr](cdr/cdr_test.go).
+
+```sh
+make moveit    # router + the stand-in move_group + the pick and place
+```
+
+```
+INFO moving to a known configuration group=panda_arm attempt=1
+INFO move_group state=PLANNING
+INFO plan executed group=panda_arm planning_time=300ms points=2
+INFO reaching for the object x=0.4 y=0.1 z=0.35
+INFO closing the hand group=hand
+...
+WARN mission step failed, taking the fail branch step=place fail=recover
+     err="planning panda_arm: ABORTED (moveit error planning failed)"
+WARN planning failed, returning to a known configuration
+INFO object placed, fetching the next placed=1 of=3
+INFO job complete objects_placed=3
+```
+
 ## `conductor externals`: ask the graph instead of transcribing it
 
 The externals block is the one thing the checker takes entirely on trust. It
@@ -1338,7 +1443,7 @@ $ systemctl --user status patrol.service
 
 ## Status
 
-v1.7 — the static toolchain (scan → validate → generate) works; the runtime
+v1.8 — the static toolchain (scan → validate → generate) works; the runtime
 executes nodes over a pluggable transport: in-process bus by default, or
 Zenoh/rmw_zenoh to join a live ROS 2 graph (see above). CDR serialization is
 pure Go, byte-verified against rclpy; `.msg`/`.srv`/`.action` codegen
@@ -1356,12 +1461,12 @@ transitions, checked by the same toolchain and drawn in `gen/mission.dot` —
 and so is the transform tree: `frames.json` is published on `tf_static`,
 composed by `TF.Lookup`, stamped into headers by a `frame:` tag, and
 validated at build time. `.tools/interop.sh` checks every leg against real
-ROS 2 — 42 of them, including tf2 composing our declared transforms, the whole
-turtlesim tutorial, Nav2's interfaces being discoverable under their own type
-names from vendored definitions, an externals block derived from a live graph
-matching the one that is committed, and `ros2 lifecycle get` confirming that a
-conductor application drove somebody else's managed nodes from unconfigured to
-active. A deployment's processes aggregate into one fleet
+ROS 2 — 47 of them, including tf2 composing our declared transforms, the whole
+turtlesim tutorial, Nav2's and MoveIt's interfaces being discoverable under
+their own type names from vendored definitions, an externals block derived from
+a live graph matching the one that is committed, and `ros2 lifecycle get`
+confirming that a conductor application drove somebody else's managed nodes from
+unconfigured to active. A deployment's processes aggregate into one fleet
 view — union graph, findings only the merge can see, and traces stitched
 across processes — and an environment may run on several robots, rolled out
 one at a time behind a health gate. `conductor run` brings an environment up
@@ -1389,10 +1494,14 @@ one, in either of the two modes a real robot needs — published by conductor, o
 attributed to the `robot_state_publisher` that already owns it and merely
 resolvable here.
 
-Next, in rough order: the same treatment for MoveIt (with SRDF planning groups
-declared like frames); `/robot_description` published, which needs
-transient-local durability; and simulated time behind the same clock abstraction
-the test harness already proves out. Transient-local latching (`tf_static` is
+MoveIt gets the same treatment in [examples/moveit](examples/moveit/commander.go):
+pick and place as a mission, with planning groups and their named configurations
+declared from the robot's SRDF and checked at build time.
+
+Next, in rough order: `/robot_description` published, which needs transient-local
+durability; simulated time behind the same clock abstraction the test harness
+already proves out; and trace context that survives a publish from a mission
+step. Transient-local latching (`tf_static` is
 republished instead) and multi-instance node namespacing remain open. See
 [What comes next](DESIGN.md#what-comes-next-v14-and-beyond) in
 [DESIGN.md](DESIGN.md).
@@ -1405,7 +1514,7 @@ republished instead) and multi-instance node namespacing remain open. See
 - [internal/run](internal/run/run.go) — `conductor run`: start what the environment needs, run the app, stop it all
 - [internal/graph](internal/graph/graph.go) — topic graph construction + validation rules ([missions](internal/graph/mission.go), [frames](internal/graph/frames.go))
 - [internal/discover](internal/discover/graph.go) — read a live ROS graph; derive and diff [externals](internal/discover/externals.go)
-- [internal/urdf](internal/urdf/urdf.go) — read a robot description; [derive](internal/urdf/frames.go) the transform tree from it
+- [internal/urdf](internal/urdf/urdf.go) — read a robot description; derive the [transform tree](internal/urdf/frames.go) and the [planning groups](internal/urdf/srdf.go) from it
 - [internal/gen](internal/gen/gen.go) — launch/params/dot and [systemd unit](internal/gen/systemd.go) generation
 - [internal/deploy](internal/deploy/deploy.go) — cross-compile, bundle, ship, roll back
 - [cdr](cdr/cdr.go) — pure-Go CDR (XCDR1-LE) codec, golden-tested against rclpy
@@ -1419,3 +1528,5 @@ republished instead) and multi-instance node namespacing remain open. See
 - [examples/turtlesim](examples/turtlesim/main.go) — the ROS 2 turtlesim tutorial, in conductor
 - [examples/nav2](examples/nav2/commander.go) — a Nav2 patrol: lifecycle startup, recovery branches, docking (with [tests](examples/nav2/nav2_test.go))
 - [examples/nav2stub](examples/nav2stub/main.go) — Nav2's interfaces without Nav2, so the above runs anywhere
+- [examples/moveit](examples/moveit/commander.go) — a pick and place over MoveIt's move_action, with SRDF-declared planning groups (with [tests](examples/moveit/moveit_test.go))
+- [examples/moveitstub](examples/moveitstub/main.go) — move_group's interface without MoveIt

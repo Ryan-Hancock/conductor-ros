@@ -53,6 +53,9 @@ type TestOptions struct {
 	// Frames is the transform tree the app runs with, as frames.json would
 	// supply at runtime. Use conductor.LoadFrames to read the real one.
 	Frames *FrameTree
+	// Semantics are the planning groups, as groups.json would supply at
+	// runtime. Use conductor.LoadSemantics to read the real ones.
+	Semantics *Semantics
 }
 
 // NewTestApp wires nodes and (unless ManualLifecycle) brings them up.
@@ -64,6 +67,7 @@ func NewTestApp(opts TestOptions, nodes ...any) (*TestApp, error) {
 		params:       opts.Params,
 		manualTimers: !opts.RealTimers,
 		frames:       opts.Frames,
+		semantics:    opts.Semantics,
 	}, nodes...)
 	if err != nil {
 		return nil, err

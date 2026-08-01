@@ -66,3 +66,28 @@ func loadGroups(dir, name string, app *App) error {
 	}
 	return nil
 }
+
+// loadDescription finds the robot description beside conductor.json: the URDF
+// the transform tree was derived from, which the runtime publishes on
+// /robot_description when this application owns that tree.
+//
+// One .urdf in the application's directory is the description. That is
+// convention rather than configuration, and it adapts to the file being named
+// for the robot — patrol.urdf, turtlebot3_waffle.urdf — which is worth keeping:
+// a vendored upstream description renamed to robot.urdf stops being obviously
+// the upstream file. Two of them is ambiguous, so neither is chosen and the
+// report says why.
+func loadDescription(dir string, app *App) {
+	matches, err := filepath.Glob(filepath.Join(dir, "*.urdf"))
+	if err != nil || len(matches) == 0 {
+		return
+	}
+	if len(matches) > 1 {
+		for i, m := range matches {
+			matches[i] = filepath.Base(m)
+		}
+		app.DescriptionAmbiguous = matches
+		return
+	}
+	app.DescriptionFile = filepath.Base(matches[0])
+}

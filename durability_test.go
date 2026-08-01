@@ -216,3 +216,64 @@ type estopWatcher struct {
 }
 
 func (e *estopWatcher) OnEstop(m latchedMsg) { heldSeen.Store(int64(m.N)) }
+
+// A robot's model belongs on /robot_description, latched, so that a tool
+// started later can draw it. It is published exactly when the transform tree is
+// — by the application that owns the description — because a second latched
+// publisher on that topic is the same fault as two static transforms for one
+// child.
+func TestRobotDescriptionIsPublishedWithTheTree(t *testing.T) {
+	const urdf = `<?xml version="1.0"?><robot name="test"><link name="base_link"/></robot>`
+	ours := &FrameTree{Path: "frames.json", Transforms: []Transform{
+		{Parent: "base_link", Child: "laser", XYZ: [3]float64{0.1, 0, 0.2}},
+	}}
+	ta, err := NewTestApp(TestOptions{Frames: ours, Description: urdf}, &framePublisher{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ta.Close()
+	ta.Settle()
+
+	var seen []stringMsg
+	q, _ := QoSProfile("transient")
+	err = ta.a.rt.transport.Subscribe(TopicSpec{
+		Topic: descriptionTopic, QoS: q, Type: reflect.TypeFor[stringMsg](), Node: "rviz",
+	}, func(m any, _ Metadata) { seen = append(seen, m.(stringMsg)) })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(seen) != 1 {
+		t.Fatalf("a tool started afterwards received %d descriptions, want the latched one", len(seen))
+	}
+	if seen[0].Data != urdf {
+		t.Errorf("published %q, want the description verbatim", seen[0].Data)
+	}
+}
+
+// A robot whose transforms are somebody else's publishes no description: that
+// robot has a robot_state_publisher, and it is already publishing this topic.
+func TestRobotDescriptionIsNotPublishedWhenTheTreeIsNotOurs(t *testing.T) {
+	theirs := &FrameTree{Path: "frames.json", Transforms: []Transform{
+		{Parent: "base_link", Child: "laser", XYZ: [3]float64{0.1, 0, 0.2}, By: "robot_state_publisher"},
+	}}
+	ta, err := NewTestApp(TestOptions{
+		Frames: theirs, Description: `<robot name="test"/>`,
+	}, &framePublisher{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ta.Close()
+	ta.Settle()
+
+	var seen int
+	q, _ := QoSProfile("transient")
+	err = ta.a.rt.transport.Subscribe(TopicSpec{
+		Topic: descriptionTopic, QoS: q, Type: reflect.TypeFor[stringMsg](), Node: "rviz",
+	}, func(any, Metadata) { seen++ })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if seen != 0 {
+		t.Errorf("published %d description(s) for a robot whose model belongs to robot_state_publisher", seen)
+	}
+}

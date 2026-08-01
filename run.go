@@ -35,6 +35,12 @@ type runtimeState struct {
 	// semantics are the declared planning groups (groups.json, derived from an
 	// SRDF), against which conductor.Group fields are resolved.
 	semantics *Semantics
+
+	// description is the robot's URDF as text, published on
+	// /robot_description by whichever node publishes the transform tree;
+	// descriptionPublisher names it, so one process publishes once.
+	description          string
+	descriptionPublisher string
 }
 
 // binder is implemented by the framework field types (Sub, Pub, Param, Timer);
@@ -68,6 +74,8 @@ func Run(nodes ...any) {
 	dashTraces := fs.Int("dashboard-traces", 0, "record this many recent spans for the dashboard's trace view (implies tracing)")
 	framesFile := fs.String("frames", "frames.json", "transform tree to publish and look up (see frames.json)")
 	groupsFile := fs.String("groups", "groups.json", "planning groups to resolve conductor.Group fields against")
+	descriptionFile := fs.String("description", "robot.urdf",
+		"robot description to publish on /robot_description (when this application owns the transform tree)")
 	var paramFiles stringList
 	fs.Var(&paramFiles, "params", "parameter file to load (repeatable; later files win)")
 	env := fs.String("env", "", "environment name: also loads params.<env>.yaml next to the last -params file, or ./params.<env>.yaml")
@@ -121,6 +129,17 @@ func Run(nodes ...any) {
 			"groups", strings.Join(semantics.Names(), ","))
 	}
 
+	descriptionPath, err := findFramesFile(*descriptionFile, explicitlySet(fs, "description"))
+	if err != nil {
+		slog.Error("conductor: robot description", "err", err)
+		os.Exit(1)
+	}
+	description, err := loadDescription(descriptionPath)
+	if err != nil {
+		slog.Error("conductor: loading the robot description", "err", err)
+		os.Exit(1)
+	}
+
 	if *traceLog {
 		AddExporter(LogExporter{})
 	}
@@ -131,12 +150,13 @@ func Run(nodes ...any) {
 	}
 
 	a, err := newAppOpts(appOptions{
-		transport: *transportName,
-		topts:     TransportOptions{Endpoint: *endpoint, Domain: *domain},
-		only:      *only,
-		params:    values,
-		frames:    frames,
-		semantics: semantics,
+		transport:   *transportName,
+		topts:       TransportOptions{Endpoint: *endpoint, Domain: *domain},
+		only:        *only,
+		params:      values,
+		frames:      frames,
+		semantics:   semantics,
+		description: description,
 	}, nodes...)
 	if err != nil {
 		slog.Error("conductor: startup failed", "err", err)
@@ -312,6 +332,7 @@ type appOptions struct {
 	manualTimers bool                         // do not start tickers; fire timers explicitly
 	frames       *FrameTree                   // declared transform tree, if any
 	semantics    *Semantics                   // declared planning groups, if any
+	description  string                       // robot description to publish, if this app owns it
 }
 
 func newApp(transportName string, topts TransportOptions, only string, nodeStructs ...any) (*app, error) {
@@ -327,7 +348,10 @@ func newAppOpts(o appOptions, nodeStructs ...any) (*app, error) {
 	if err != nil {
 		return nil, err
 	}
-	rt := &runtimeState{transport: tr, paramValues: o.params, frames: o.frames, semantics: o.semantics}
+	rt := &runtimeState{
+		transport: tr, paramValues: o.params,
+		frames: o.frames, semantics: o.semantics, description: o.description,
+	}
 	for _, ns := range nodeStructs {
 		ptr := reflect.ValueOf(ns)
 		if ptr.Kind() != reflect.Pointer || ptr.Elem().Kind() != reflect.Struct {

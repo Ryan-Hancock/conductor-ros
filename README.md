@@ -432,6 +432,19 @@ asks for the tree and gets it. `ros2 topic echo /tf_static` run long after the
 robot started returns immediately, and an `rviz` opened at any point sees the
 same tree.
 
+The robot's description is published the same way. Every ROS tool that draws a
+robot finds its model on `/robot_description`, latched; conductor already reads
+that file to derive the frames, so it publishes it too — **exactly when it owns
+the transform tree**. A robot with a `robot_state_publisher` already has that
+topic, and a second latched publisher on it is the same fault as two static
+transforms for one child, so `conductor check` says which case you are in:
+
+```
+robot description (patrol.urdf): published on /robot_description, latched
+robot description (turtlebot3_waffle.urdf): read to derive the frames; not
+    published, because the transform tree is not this application's to publish
+```
+
 ## Parameters and environments
 
 `Param[T]` values resolve in three layers — the `default` tag, then any
@@ -1464,7 +1477,8 @@ transitions, checked by the same toolchain and drawn in `gen/mission.dot` —
 and so is the transform tree: `frames.json` is published on `tf_static`,
 composed by `TF.Lookup`, stamped into headers by a `frame:` tag, and
 validated at build time. `.tools/interop.sh` checks every leg against real
-ROS 2 — 49 of them, including latched topics in both directions, tf2 composing our declared transforms, the whole
+ROS 2 — 51 of them, including latched topics in both directions and a robot
+description a tool can draw, tf2 composing our declared transforms, the whole
 turtlesim tutorial, Nav2's and MoveIt's interfaces being discoverable under
 their own type names from vendored definitions, an externals block derived from
 a live graph matching the one that is committed, and `ros2 lifecycle get`
@@ -1505,10 +1519,12 @@ Transient-local durability is implemented on both transports, so `/tf_static` is
 published once and latched rather than repeated, and a conductor node receives a
 latched topic published before it started.
 
-Next, in rough order: `/robot_description` published (now unblocked); simulated
-time behind the same clock abstraction the test harness already proves out; and
-trace context that survives a publish from a mission step. Multi-instance node
-namespacing remains open. See
+`/robot_description` is published too, latched, by an application that owns the
+robot's transform tree.
+
+Next, in rough order: simulated time behind the same clock abstraction the test
+harness already proves out; and trace context that survives a publish from a
+mission step. Multi-instance node namespacing remains open. See
 [What comes next](DESIGN.md#what-comes-next-v19-and-beyond) in
 [DESIGN.md](DESIGN.md).
 

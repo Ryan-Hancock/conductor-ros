@@ -218,7 +218,8 @@ fi
 
 if [[ "$GROUP" == all || "$GROUP" == frames ]]; then
   echo "frames:"
-  bg "$WORK/frames_node.log" "$BIN/patrol" -transport zenoh -frames examples/patrol/frames.json
+  bg "$WORK/frames_node.log" "$BIN/patrol" -transport zenoh -frames examples/patrol/frames.json \
+    -description examples/patrol/patrol.urdf
   frames_pid="$LAST_PID"
   sleep 3
 
@@ -254,6 +255,18 @@ if [[ "$GROUP" == all || "$GROUP" == frames ]]; then
   ros2run 20 topic echo --once --qos-durability transient_local --qos-reliability reliable \
     /tf_static >"$WORK/tf_latched.log" 2>&1
   check "a late subscriber still gets the latched tree" "$WORK/tf_latched.log" "child_frame_id: laser"
+
+  # The robot's model belongs on /robot_description, latched, so a tool started
+  # at any point can draw the robot. This application owns the transform tree —
+  # patrol has no robot_state_publisher — so it publishes the description the
+  # tree was derived from.
+  # --full-length because echo truncates a long string, and the interesting
+  # part of a URDF is not in its first hundred characters.
+  ros2run 20 topic echo --once --full-length --qos-durability transient_local \
+    --qos-reliability reliable /robot_description >"$WORK/description.log" 2>&1
+  check "the robot description is published and latched" "$WORK/description.log" "<robot name="
+  ros2run 20 topic info -v /robot_description >"$WORK/description_info.log" 2>&1
+  check "it is a std_msgs/String, transient-local" "$WORK/description_info.log" "Durability: TRANSIENT_LOCAL"
 
   { kill -9 "$frames_pid"; wait "$frames_pid"; } 2>/dev/null
   sleep 1

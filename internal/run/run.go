@@ -365,6 +365,9 @@ func Flags(app *scan.App) []string {
 	if app.GroupsFile != "" {
 		flags = append(flags, "-groups", filepath.Join(app.Dir, app.GroupsFile))
 	}
+	if app.DescriptionFile != "" {
+		flags = append(flags, "-description", filepath.Join(app.Dir, app.DescriptionFile))
+	}
 	if env.Metrics != "" {
 		flags = append(flags, "-metrics-addr", env.Metrics)
 	}

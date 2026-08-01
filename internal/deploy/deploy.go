@@ -327,6 +327,18 @@ func build(app *scan.App, g *graph.Graph, dep gen.Deployment, o Options, stage s
 			return nil, err
 		}
 	}
+	// The robot's own description ships too: it is what /robot_description
+	// carries, and a release that cannot answer that question is a robot no
+	// tool can draw.
+	if app.DescriptionFile != "" {
+		src, err := os.ReadFile(filepath.Join(app.Dir, app.DescriptionFile))
+		if err != nil {
+			return nil, fmt.Errorf("robot description: %w", err)
+		}
+		if err := write(app.DescriptionFile, string(src), 0o644); err != nil {
+			return nil, err
+		}
+	}
 	launchBin := path.Join(dep.CurrentDir(), "bin", app.Name)
 	if err := write(app.Name+".launch.xml", gen.LaunchXML(g, launchBin), 0o644); err != nil {
 		return nil, err
@@ -467,6 +479,9 @@ func runtimeFlags(app *scan.App, o Options) []string {
 	}
 	if app.GroupsFile != "" {
 		flags = append(flags, "-groups", path.Join(current, "groups.json"))
+	}
+	if app.DescriptionFile != "" {
+		flags = append(flags, "-description", path.Join(current, app.DescriptionFile))
 	}
 	if env.Trace {
 		flags = append(flags, "-trace")

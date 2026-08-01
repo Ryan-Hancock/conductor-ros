@@ -49,6 +49,13 @@ type App struct {
 	Semantics  *conductor.Semantics
 	GroupsFile string
 
+	// DescriptionFile is the robot description beside conductor.json, empty
+	// when there is none. The runtime publishes it on /robot_description when
+	// this application owns the transform tree. DescriptionAmbiguous lists the
+	// candidates when there is more than one, so the report can say so.
+	DescriptionFile      string
+	DescriptionAmbiguous []string
+
 	// Environments are declared in environments.json (see environments.go).
 	// Env is the one this App has been resolved for, nil until Resolve.
 	Environments map[string]*Environment
@@ -250,6 +257,7 @@ func ScanApp(dir string) (*App, error) {
 	if err := loadGroups(abs, "groups.json", app); err != nil {
 		return nil, err
 	}
+	loadDescription(abs, app)
 
 	err = walkGoFiles(root, func(path string, f *ast.File, fset *token.FileSet) {
 		collectMessages(f, app.Messages, app.Stamped)

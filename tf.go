@@ -71,6 +71,9 @@ func (f *TF) bind(rt *runtimeState, nr *nodeRuntime, field reflect.StructField, 
 		return nil
 	}
 	rt.tfPublisher = nr.name
+	// The same declaration that says these transforms are ours to publish says
+	// the description they came from is ours too.
+	publishDescription(rt, nr)
 
 	q, _ := QoSProfile("transient")
 	publish, err := rt.transport.Publisher(TopicSpec{

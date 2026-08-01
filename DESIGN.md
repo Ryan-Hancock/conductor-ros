@@ -208,7 +208,7 @@ consolidation explicitly, with a comment) are the exact places bugs hide.
 | Driving MoveIt | as above, plus planning-group magic strings | `examples/moveit`: pick and place as a mission over `move_action`, planning groups and named configurations declared from the robot's SRDF and checked (CND070–071); 30 vendored definitions across three packages, and the deepest message in ROS round-tripped through the codec | ✅ v1.8 |
 | Bringing a managed stack up | `lifecycle_manager` + `autostart`, ordering in a launch file | `conductor.Lifecycle`: the list of managed nodes is a declaration, `BringUp` configures then activates it in order, teardown runs it in reverse, and the checker validates the list while `conductor externals` verifies the names against a live graph | ✅ v1.6 |
 | Robot description | URDF + xacro, constants duplicated into code and launch files | `conductor frames -from robot.urdf`: fixed joints become the tree's fixed transforms, movable ones the dynamic links a robot_state_publisher provides, and the frame checks then apply to the robot's real description | ✅ v1.7 |
-| Robot description, the rest | `/robot_description` read by every tool | published by conductor (needs transient-local durability) | v1.9 |
+| Robot description, published | `/robot_description` from a robot_state_publisher launched with the file | published by the application that owns the transform tree, latched, from the same URDF the frames were derived from | ✅ v1.9 |
 | Simulation | `use_sim_time` folklore, hand-written spawn scripts | the simulator is a declared `requires`; a clock source behind `Timer` and header stamping so sim time is the same code path as wall time | v1.7 |
 
 ## Observability (v0.8, implemented)
@@ -830,9 +830,25 @@ returns the tree eight seconds after the single publish that produced it, and a
 conductor node started six seconds *after* a `ros2 topic pub --qos-durability
 transient_local` receives the value it missed. Both are interop legs now.
 
-What this unblocks: `/robot_description`, which is a latched topic by
-convention and the one remaining piece of the robot description conductor reads
-but does not publish.
+**`/robot_description` follows from it.** Every ROS tool that draws a robot
+finds its model on that topic, latched, and conductor already reads the file to
+derive the transform tree — so it publishes it, and a conductor-only robot
+becomes legible to tools that know nothing about conductor.
+
+The question worth getting right was *when*. A robot with a
+robot_state_publisher already has that topic, and a second latched publisher on
+it is the same fault as two static transforms for one child. The transform tree
+already answers it: the declaration that says "these transforms are ours to
+publish" says the description is ours too. So it is published by the node that
+publishes the tree, when it goes active, and not at all when the tree is
+attributed to somebody else — which is exactly the split between the two
+examples, and `conductor check` prints which case an application is in.
+
+Finding the file is convention rather than configuration: one `.urdf` beside
+conductor.json is the description. That adapts to it being named for the robot —
+`patrol.urdf`, `turtlebot3_waffle.urdf` — which matters, because a vendored
+upstream description renamed to `robot.urdf` stops being obviously the upstream
+file. Two of them is ambiguous, so neither is chosen and the report says so.
 
 ## What comes next (v1.10 and beyond)
 
@@ -843,13 +859,8 @@ the ecosystem by hand.
 
 ### The robot description: what is left
 
-The transform tree comes from the URDF and the planning groups from the SRDF
-(above). What is left of a robot description is publishing it.
-
-Tools find a robot's model on **`/robot_description`**, a transient-local topic
-— which is a second dependent for the latching gap below, and an argument for
-closing it. Publishing the description conductor already parses would make a
-conductor-only robot legible to rviz and to anything else that expects it.
+The transform tree comes from the URDF, the planning groups from the SRDF, and
+the description itself is published on `/robot_description` (above).
 
 The SRDF's **disabled collision pairs** are also read by nobody here yet. They
 are the largest part of that file and the least useful to an orchestrator: they

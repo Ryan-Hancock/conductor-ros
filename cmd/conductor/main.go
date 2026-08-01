@@ -280,6 +280,18 @@ func printReport(app *scan.App, g *graph.Graph, issues []graph.Issue) {
 		}
 	}
 
+	if app.DescriptionFile != "" && len(app.Frames.Published()) > 0 {
+		fmt.Printf("\nrobot description (%s): published on /robot_description, latched\n",
+			app.DescriptionFile)
+	} else if app.DescriptionFile != "" {
+		fmt.Printf("\nrobot description (%s): read to derive the frames; not published, "+
+			"because the transform tree is not this application's to publish\n", app.DescriptionFile)
+	} else if len(app.DescriptionAmbiguous) > 0 {
+		fmt.Printf("\nrobot description: %d candidates (%s) — none is published; "+
+			"name one with -description\n",
+			len(app.DescriptionAmbiguous), strings.Join(app.DescriptionAmbiguous, ", "))
+	}
+
 	if links := graph.FrameLinks(g.Frames); len(links) > 0 {
 		fmt.Printf("\nframes (%s):\n", app.FramesFile)
 		for _, l := range links {

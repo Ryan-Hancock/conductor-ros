@@ -56,6 +56,10 @@ type TestOptions struct {
 	// Semantics are the planning groups, as groups.json would supply at
 	// runtime. Use conductor.LoadSemantics to read the real ones.
 	Semantics *Semantics
+	// Description is the robot's URDF text, as -description would supply at
+	// runtime; it is published on /robot_description when this application
+	// owns the transform tree.
+	Description string
 }
 
 // NewTestApp wires nodes and (unless ManualLifecycle) brings them up.
@@ -68,6 +72,7 @@ func NewTestApp(opts TestOptions, nodes ...any) (*TestApp, error) {
 		manualTimers: !opts.RealTimers,
 		frames:       opts.Frames,
 		semantics:    opts.Semantics,
+		description:  opts.Description,
 	}, nodes...)
 	if err != nil {
 		return nil, err

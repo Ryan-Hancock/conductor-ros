@@ -8,7 +8,7 @@
 #   ./.tools/interop.sh            run every leg
 #   ./.tools/interop.sh services   one group
 #                                  (services | actions | lifecycle | params |
-#                                   frames | nav2 | moveit | turtlesim)
+#                                   frames | simtime | nav2 | moveit | turtlesim)
 #
 # Requires a ROS 2 install plus the user-space rmw_zenoh overlay in .tools
 # (see env.sh). Starts and stops its own zenoh router.
@@ -57,6 +57,7 @@ pkill -9 -x patrol 2>/dev/null
 pkill -9 -x fibonacci 2>/dev/null
 pkill -9 -x mission 2>/dev/null
 pkill -9 -f pyfib_server.py 2>/dev/null
+pkill -9 -f sim_clock.py 2>/dev/null
 pkill -9 -x turtlesim 2>/dev/null
 pkill -9 -x turtlesim_node 2>/dev/null
 pkill -9 -x tf2_echo 2>/dev/null
@@ -315,6 +316,46 @@ if [[ "$GROUP" == all || "$GROUP" == actions ]]; then
   sleep 4
   timeout 40 "$BIN/mission" -transport zenoh >"$WORK/act_go_to_py.log" 2>&1
   check "conductor client -> rclpy server" "$WORK/act_go_to_py.log" "status=SUCCEEDED"
+fi
+
+if [[ "$GROUP" == all || "$GROUP" == simtime ]]; then
+  echo "simulated time:"
+  # A robot on simulated time takes its time from /clock, as everything in a
+  # Gazebo world does. Two things have to be true, and the first is the one
+  # people get wrong: nothing happens at all until the simulator says what time
+  # it is.
+  bg "$WORK/simtime_node.log" "$BIN/patrol" -transport zenoh -use-sim-time \
+    -frames examples/patrol/frames.json
+  simtime_pid="$LAST_PID"
+  sleep 5
+
+  ros2run 8 topic echo --once /amcl_pose >"$WORK/simtime_silent.log" 2>&1
+  if grep -q "frame_id" "$WORK/simtime_silent.log"; then
+    echo "  FAIL  a robot on simulated time waits for the clock"
+    FAIL=$((FAIL + 1))
+  else
+    echo "  PASS  a robot on simulated time waits for the clock"
+    PASS=$((PASS + 1))
+  fi
+
+  # Now give the world a time. The start is deliberately unmistakable: a stamp
+  # in wall time would be about 1.78e9, and this is 424242.
+  bg "$WORK/sim_clock.log" python3 .tools/sim_clock.py --scale 1.0 --start 424242
+  sim_clock_pid="$LAST_PID"
+  sleep 5
+
+  ros2run 20 topic echo --once /amcl_pose >"$WORK/simtime_stamp.log" 2>&1
+  check "the robot runs once the simulator publishes a time" "$WORK/simtime_stamp.log" "frame_id: map"
+  check "its messages are stamped in simulated time" "$WORK/simtime_stamp.log" "sec: 42424"
+
+  # And it says which clock it is on, because tools ask.
+  ros2run 20 param get /localizer use_sim_time >"$WORK/simtime_param.log" 2>&1
+  check "use_sim_time reports the truth" "$WORK/simtime_param.log" "Boolean value is: True"
+
+  { kill -9 "$sim_clock_pid"; wait "$sim_clock_pid"; } 2>/dev/null
+  { kill -9 "$simtime_pid"; wait "$simtime_pid"; } 2>/dev/null
+  pkill -9 -f sim_clock.py 2>/dev/null
+  sleep 1
 fi
 
 if [[ "$GROUP" == all || "$GROUP" == nav2 ]]; then

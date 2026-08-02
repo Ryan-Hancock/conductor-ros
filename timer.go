@@ -48,7 +48,7 @@ func (t *Timer) bind(rt *runtimeState, nr *nodeRuntime, field reflect.StructFiel
 		// A timer starts a fresh trace: nothing caused it but the clock.
 		nr.runInstrumented(SpanTimer, name, TraceContext{}, h)
 	}
-	rt.timers = append(rt.timers, &timerHandle{period: period, node: nr, fire: fire})
+	rt.timers = append(rt.timers, &timerHandle{period: period, node: nr, fire: fire, clock: rt.clock})
 	rt.recordEndpoint(Endpoint{Node: nr.name, Kind: EndpointTimer, Field: field.Name, Name: name,
 		Rate: rate, count: countOf(t.fired.Load)})
 	return nil
@@ -75,6 +75,7 @@ type timerHandle struct {
 	period time.Duration
 	node   *nodeRuntime
 	fire   func()
+	clock  Clock
 	stop   chan struct{}
 	done   chan struct{}
 }
@@ -82,17 +83,23 @@ type timerHandle struct {
 func (th *timerHandle) start() {
 	th.stop = make(chan struct{})
 	th.done = make(chan struct{})
+	clock := th.clock
+	if clock == nil {
+		clock = wallClock{}
+	}
 	go func() {
 		defer close(th.done)
-		t := time.NewTicker(th.period)
-		defer t.Stop()
+		ticks, stopTicker := clock.Ticker(th.period)
+		defer stopTicker()
 		for {
 			select {
 			case <-th.stop:
 				return
-			case <-t.C:
-				// Timers only fire while the node is active.
-				if th.node.active() {
+			case <-ticks:
+				// Timers only fire while the node is active, and only once the
+				// clock has a time: under simulated time nothing has happened
+				// yet until the simulator says so.
+				if th.node.active() && clock.Started() {
 					th.node.enqueue(th.fire)
 				}
 			}

@@ -62,7 +62,18 @@ code, .mono { font-family: var(--mono); font-size: 12px; }
 .state.active { color: var(--accent); }
 .state.inactive, .state.unconfigured { color: var(--warn); }
 .state.finalized, .state.errorprocessing { color: var(--bad); }
-.nodes { display: grid; grid-template-columns: repeat(auto-fill, minmax(330px, 1fr)); gap: 14px; padding: 14px 16px; }
+.alert {
+  display: flex; align-items: center; gap: 9px; padding: 10px 14px; font-size: 13px;
+  border: 1px solid var(--warn); border-radius: 8px; color: var(--warn); background: var(--panel);
+}
+.alert[hidden] { display: none; }
+.alert b { color: var(--ink); font-weight: 600; }
+.alert .why { color: var(--dim); }
+.chip.on { background: color-mix(in srgb, var(--accent) 16%, transparent); color: var(--accent); }
+.chip.warn { background: color-mix(in srgb, var(--warn) 16%, transparent); color: var(--warn); }
+#tracesec .body { max-height: 320px; overflow-y: auto; }
+.nodes { display: grid; grid-template-columns: repeat(auto-fill, minmax(330px, 1fr));
+         gap: 14px; padding: 14px 16px; align-items: start; }
 .node { border: 1px solid var(--line); border-radius: 7px; padding: 12px 13px; }
 .node h3 { margin: 0 0 2px; font-size: 14px; font-weight: 600; display: flex; align-items: center; gap: 8px; }
 .node .sub { color: var(--dim); font-size: 11px; margin-bottom: 9px; }
@@ -142,6 +153,7 @@ svg { display: block; width: 100%; height: auto; }
 </header>
 
 <main>
+  <div class="alert" id="alert" hidden></div>
   <section>
     <h2>graph</h2>
     <div class="body"><svg id="graph"></svg></div>
@@ -173,7 +185,7 @@ svg { display: block; width: 100%; height: auto; }
     <div class="body" id="frames"></div>
   </section>
 
-  <section>
+  <section id="tracesec">
     <div class="hdrrow"><h2>traces</h2><span class="chip" id="tracehint"></span></div>
     <div class="body" id="traces"></div>
   </section>
@@ -208,11 +220,25 @@ $("pause").onclick = () => {
 
 // Rates are computed here, from successive snapshots, so the runtime keeps
 // exposing plain counters and never has to pick a window.
+//
+// The window has a floor: a browser fires this loop when it feels like it, and
+// two snapshots 20ms apart say nothing about a 5hz topic — the honest reading
+// is the one from the last window long enough to mean something, held until
+// the next one closes. A counter that went backwards is a restarted process,
+// so measurement starts over rather than reporting a negative rate.
+const minWindow = 0.4;
 function rate(key, value, dt) {
-  const before = rates.get(key);
-  rates.set(key, value);
-  if (before === undefined || dt <= 0 || value < before) return null;
-  return (value - before) / dt;
+  let m = rates.get(key);
+  if (m === undefined || value < m.value) {
+    rates.set(key, { value, at: 0, rate: null });
+    return null;
+  }
+  m.at += dt;
+  if (m.at >= minWindow) {
+    m.rate = (value - m.value) / m.at;
+    m.value = value; m.at = 0;
+  }
+  return m.rate;
 }
 const fmtRate = (r) => r === null ? "" : (r >= 100 ? r.toFixed(0) : r >= 10 ? r.toFixed(1) : r.toFixed(2));
 const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
@@ -221,10 +247,28 @@ function renderHeader(s) {
   $("appname").innerHTML = esc(s.app.name) + ' <span>' + esc(s.app.transport) + '</span>';
   const up = s.app.uptime_seconds;
   const uptime = up < 90 ? up.toFixed(0) + "s" : up < 5400 ? (up / 60).toFixed(1) + "m" : (up / 3600).toFixed(1) + "h";
+  // Which clock the robot is on belongs next to the uptime: under simulated
+  // time a stopped clock is the answer to "why is nothing happening", and it
+  // is invisible everywhere else on the page.
+  const sim = s.app.clock === "sim";
+  const waiting = sim && !s.app.clock_started;
+  const clock = !sim ? "wall" : waiting ? "waiting for /clock" : "sim " + simTime(s.app.clock_time);
   $("meta").innerHTML = [
-    ["host", s.app.host], ["pid", s.app.pid], ["uptime", uptime],
+    ["host", s.app.host], ["pid", s.app.pid], ["uptime", uptime], ["clock", clock],
     ["nodes", s.nodes.length], ["bringup", s.app.bringup_order.join(" → ")],
   ].map(([k, v]) => `${k} <b>${esc(v)}</b>`).join("");
+
+  $("alert").hidden = !waiting;
+  if (waiting) $("alert").innerHTML = `<b>the simulated clock has not started.</b>
+    <span class="why">This process runs on <code>/clock</code> and nothing has published it yet:
+    timers are not firing and mission steps are not timing out. Start the simulator.</span>`;
+}
+
+// Simulated time is a stopwatch reading, not a date: showing 1970 or a
+// wall-clock time for it would be a lie about what the robot thinks.
+function simTime(t) {
+  const s = Date.parse(t) / 1000;
+  return s < 3600 ? s.toFixed(1) + "s" : (s / 3600).toFixed(2) + "h";
 }
 
 // The graph is laid out in bringup order: providers left, consumers right,
@@ -238,7 +282,7 @@ function renderGraph(s, flows) {
     if (!t.pubs.length) external.push({ topic: t, side: "in" });
     else if (!t.subs.length) external.push({ topic: t, side: "out" });
   }
-  const W = 168, H = 42, GAPX = 92, GAPY = 26, PAD = 8;
+  const W = 168, H = 42, GAPX = 112, GAPY = 26, PAD = 8;
   const hasIn = external.some(e => e.side === "in"), hasOut = external.some(e => e.side === "out");
   const cols = order.length + (hasIn ? 1 : 0) + (hasOut ? 1 : 0);
   const offset = hasIn ? 1 : 0;
@@ -259,13 +303,20 @@ function renderGraph(s, flows) {
   // An edge between adjacent columns fits in the gap. One that skips a
   // column would otherwise be drawn straight through the boxes in between,
   // so it is routed below the row, in its own lane.
+  // Two topics between the same pair of boxes would be drawn as the same
+  // curve with their labels on top of each other, so each one after the first
+  // is bowed clear of the one before it.
   let out = "", lanes = 0;
+  const pairs = new Map();
   for (const t of s.topics) {
     const froms = t.pubs.length ? t.pubs : ["(external in)"];
     const tos = t.subs.length ? t.subs : ["(external out)"];
     for (const f of froms) for (const to of tos) {
       const a = pos.get(f), b = pos.get(to);
       if (!a || !b) continue;
+      const key = f + " > " + to;
+      const bow = (pairs.get(key) || 0) * 17;
+      pairs.set(key, (pairs.get(key) || 0) + 1);
       const x1 = a.x + W, y1 = a.y + H / 2, x2 = b.x, y2 = b.y + H / 2;
       const busy = (flows.get(t.name) || 0) > 0;
       const cls = `edge${busy ? " busy" : ""}`;
@@ -277,8 +328,8 @@ function renderGraph(s, flows) {
         lx = (x1 + x2) / 2; ly = dip - 4;
       } else {
         const mid = (x1 + x2) / 2;
-        d = `M${x1},${y1} C${mid},${y1} ${mid},${y2} ${x2},${y2}`;
-        lx = mid; ly = (y1 + y2) / 2 - 6;
+        d = `M${x1},${y1} C${mid},${y1 - bow} ${mid},${y2 - bow} ${x2},${y2}`;
+        lx = mid; ly = (y1 + y2) / 2 - 6 - bow * 0.75;
       }
       out += `<path class="${cls}" d="${d}" marker-end="url(#arrow)"/>`;
       out += `<text class="topiclabel" x="${lx}" y="${ly}" text-anchor="middle">${esc(t.name)}</text>`;
@@ -300,11 +351,23 @@ function renderNodes(s, dt) {
   $("nodes").innerHTML = s.nodes.map((n) => {
     const eps = n.endpoints.map((e) => {
       const r = rate(`ep:${n.name}:${e.kind}:${e.name}`, e.counts, dt);
-      const detail = e.type ? `<em> ${esc(e.type)}</em>` : e.rate ? `<em> ${esc(e.rate)}</em>` : "";
+      // A summary the runtime wrote ("6 joint(s)", "100hz") says more than the
+      // message type it was derived from, so it wins when both are present.
+      let detail = e.rate ? `<em> ${esc(e.rate)}</em>` : e.type ? `<em> ${esc(e.type)}</em>` : "";
       const qos = e.qos ? ` <span class="chip">${esc(e.qos)}</span>` : "";
       const frame = e.frame ? ` <span class="chip">${esc(e.frame)}</span>` : "";
+      // A lifecycle client's name is the stack it manages. Whether that stack
+      // is up is the thing worth reading first, and each node under it is a
+      // name an operator goes looking for, so both are drawn as such.
+      let name = esc(e.name);
+      if (e.kind === "lifecycle client") {
+        const up = /all active/.test(e.rate || "");
+        name = `<span class="chip ${up ? "on" : "warn"}">${esc(e.rate || "")}</span><br>`
+          + e.name.split(",").map((n) => `<span class="chip">${esc(n)}</span>`).join(" ");
+        detail = "";
+      }
       return `<div class="ep"><span class="kind">${esc(e.kind)}</span>
-        <span class="name">${esc(e.name)}${qos}${frame}${detail}</span>
+        <span class="name">${name}${qos}${frame}${detail}</span>
         <span class="rate">${e.counts}${r ? ` &middot; <b>${fmtRate(r)}/s</b>` : ""}</span></div>`;
     }).join("");
     const params = n.params.length ? `<div class="params">${n.params.map((p) =>
@@ -355,7 +418,8 @@ function renderTopics(s, dt, flows) {
     const r = flows.get(t.name);
     const ext = (list) => list.length ? esc(list.join(", ")) : '<span class="chip">ROS graph</span>';
     return `<tr><td class="mono">${esc(t.name)}</td><td class="mono">${esc(t.type || "")}</td>
-      <td><span class="chip">${esc(t.qos || "")}</span></td>
+      <td><span class="chip">${esc(t.qos || "")}</span>${t.latched
+        ? ' <span class="chip on" title="the last message is kept for subscribers that start later">latched</span>' : ""}</td>
       <td>${ext(t.pubs)}</td><td>${ext(t.subs)}</td>
       <td class="num">${t.sent}</td><td class="num">${t.received}</td>
       <td class="num">${fmtRate(r)}</td></tr>`;
@@ -400,7 +464,10 @@ function renderFrames(s) {
   box.hidden = !s.frames.length;
   if (box.hidden) return;
   const statics = s.frames.filter((f) => !f.dynamic).length;
-  $("framehint").textContent = `${statics} static, ${s.frames.length - statics} dynamic`;
+  // The robot model is the other half of the frame tree: whether this process
+  // is the one that publishes it decides who owns these transforms.
+  $("framehint").textContent = `${statics} static, ${s.frames.length - statics} dynamic`
+    + (s.app.publishes_description ? " · publishes /robot_description" : "");
   $("frames").innerHTML = s.frames.map((f) => {
     const xyz = f.xyz.map((v) => v.toFixed(3)).join(" ");
     const rpy = f.rpy.map((v) => v.toFixed(3)).join(" ");

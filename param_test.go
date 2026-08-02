@@ -169,8 +169,18 @@ func TestParameterServices(t *testing.T) {
 		t.Fatal(err)
 	}
 	names := res.(listParametersResponse).Result.Names
-	if len(names) != 4 {
-		t.Fatalf("list_parameters returned %v, want 4 parameters", names)
+	// Four declared, plus the use_sim_time every ROS node carries.
+	if len(names) != 5 {
+		t.Fatalf("list_parameters returned %v, want the four declared plus use_sim_time", names)
+	}
+	var hasSimTime bool
+	for _, n := range names {
+		if n == "use_sim_time" {
+			hasSimTime = true
+		}
+	}
+	if !hasSimTime {
+		t.Errorf("list_parameters = %v, missing use_sim_time", names)
 	}
 
 	got, err := get(getParametersRequest{Names: []string{"max_speed", "frame_id", "nope"}}, time.Second)

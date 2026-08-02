@@ -114,6 +114,7 @@ make turtlesim  # the tutorial below, router and turtlesim_node included
 | `robot.urdf` | Robot description; `conductor frames -from` derives `frames.json` from it |
 | `conductor.Group` + `.State("ready")` | Planning group from the robot's SRDF (`group:"panda_arm"`), with its named joint configurations |
 | `qos:"transient"` | Latched: late subscribers get the last message, as `/tf_static` needs |
+| `-use-sim-time` | Take time from `/clock`: timers, stamps and mission timeouts follow the simulator |
 | `//ros:type pkg/msg/Name` on a struct | Maps a Go message type to its ROS interface |
 | `conductor.json` | App name + topics provided/consumed by external ROS nodes |
 
@@ -718,7 +719,21 @@ make dashboard        # or: ./patrol -dashboard :4000 -dashboard-traces 500
 - **The mission machine**, drawn as the declared chain with the running step
   marked, its attempt count and how long it has been there.
 - **The transform tree**, static links (the ones this process publishes on
-  `tf_static`) separated from the dynamic ones it only expects.
+  `tf_static`) separated from the dynamic ones it only expects, and whether
+  this process is the one serving `/robot_description`.
+- **The clock, in the header.** `wall`, or the simulated time this process is
+  actually on. Under `-use-sim-time` a clock nobody has published is why
+  every counter reads zero and no mission step is timing out, so the page
+  says so in a banner instead of leaving it to be inferred. (`use_sim_time`
+  is a fact about the process, not a knob on a node, so it is reported here
+  once rather than as an uneditable box on every card.)
+- **The managed stack a `Lifecycle` field drives**, named node by node with
+  the last state observed for it — `6 node(s), all active`. It is a memory of
+  what the application last saw, not a poll: a dashboard that called
+  `get_state` six times a second would be lying about who is talking to whom.
+- **Latched topics marked as such**, because a transient-local topic that
+  published once an hour ago and a topic that has died look identical in a
+  count.
 - **Every metric**, filterable, with per-second rates derived in the page —
   and `/metrics` still served alongside for Prometheus.
 
@@ -1306,6 +1321,56 @@ INFO object placed, fetching the next placed=1 of=3
 INFO job complete objects_placed=3
 ```
 
+## Simulated time
+
+A robot in simulation lives in a different time from the machine running it.
+Gazebo publishes the world's time on `/clock` and expects every node to use it;
+a node that reads the system clock instead computes velocities over the wrong
+interval, times out early or late, and holds a watchdog against a clock the
+world is not using.
+
+So the runtime reads time from a clock rather than from `time.Now`, and
+`-use-sim-time` chooses which:
+
+```sh
+./patrol -transport zenoh -use-sim-time     # or USE_SIM_TIME=1 in a unit file
+```
+
+Everything that measures the robot's world follows it: **timer periods**,
+**header stamps**, **`Task.Sleep`**, a step's **`timeout:` and `backoff:`**.
+Three consequences are worth knowing, because they are what makes simulated
+time worth having:
+
+- **Nothing happens until the simulator says what time it is.** A node started
+  before Gazebo publishes anything sits silent rather than ticking against a
+  clock nobody agreed to. A world paused at a breakpoint pauses the robot's
+  timers with it.
+- **The rate is the world's, not the machine's.** Run the world at a quarter
+  speed and a 5 Hz timer fires 1.25 times a real second — measured, not
+  asserted: `.tools/sim_clock.py --scale 0.25` and the dashboard's counters
+  agree.
+- **A jump in simulated time is a jump**, not a burst of missed ticks, and a
+  reset — the world restarting — does not leave a timer waiting for an hour
+  that will not come.
+
+What stays on the wall clock, deliberately: spans, metrics and the dashboard's
+uptime. Those measure how long something really took, and an operator asking why
+the robot was slow does not want the answer in simulated seconds.
+
+Every node also carries the `use_sim_time` parameter ROS tools expect, and it
+tells the truth. Setting it on a running process is refused rather than ignored:
+a tool that sets it believes it took effect, and a robot that quietly kept the
+wrong clock is worse than one that says no.
+
+```sh
+$ ros2 param get /localizer use_sim_time
+Boolean value is: True
+$ ros2 topic echo --once /amcl_pose | head -4
+header:
+  stamp:
+    sec: 424242        # the simulator's time, not 1.78e9
+```
+
 ## `conductor externals`: ask the graph instead of transcribing it
 
 The externals block is the one thing the checker takes entirely on trust. It
@@ -1459,7 +1524,7 @@ $ systemctl --user status patrol.service
 
 ## Status
 
-v1.9 — the static toolchain (scan → validate → generate) works; the runtime
+v1.10 — the static toolchain (scan → validate → generate) works; the runtime
 executes nodes over a pluggable transport: in-process bus by default, or
 Zenoh/rmw_zenoh to join a live ROS 2 graph (see above). CDR serialization is
 pure Go, byte-verified against rclpy; `.msg`/`.srv`/`.action` codegen
@@ -1477,8 +1542,8 @@ transitions, checked by the same toolchain and drawn in `gen/mission.dot` —
 and so is the transform tree: `frames.json` is published on `tf_static`,
 composed by `TF.Lookup`, stamped into headers by a `frame:` tag, and
 validated at build time. `.tools/interop.sh` checks every leg against real
-ROS 2 — 51 of them, including latched topics in both directions and a robot
-description a tool can draw, tf2 composing our declared transforms, the whole
+ROS 2 — 55 of them, including latched topics in both directions, a robot
+description a tool can draw, and a robot whose clock is the simulator's, tf2 composing our declared transforms, the whole
 turtlesim tutorial, Nav2's and MoveIt's interfaces being discoverable under
 their own type names from vendored definitions, an externals block derived from
 a live graph matching the one that is committed, and `ros2 lifecycle get`
@@ -1522,8 +1587,11 @@ latched topic published before it started.
 `/robot_description` is published too, latched, by an application that owns the
 robot's transform tree.
 
-Next, in rough order: simulated time behind the same clock abstraction the test
-harness already proves out; and trace context that survives a publish from a
+Simulated time is implemented: `-use-sim-time` puts timers, header stamps and
+mission timeouts on the simulator's `/clock`.
+
+Next, in rough order: scenario tests with time under the test's control, and
+rosbag replay into the harness; trace context that survives a publish from a
 mission step. Multi-instance node namespacing remains open. See
 [What comes next](DESIGN.md#what-comes-next-v19-and-beyond) in
 [DESIGN.md](DESIGN.md).

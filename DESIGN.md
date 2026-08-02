@@ -1,6 +1,6 @@
 # Conductor — Design
 
-*Status: v1.9 — static toolchain + pluggable-transport runtime, an
+*Status: v1.10 — static toolchain + pluggable-transport runtime, an
 rmw_zenoh transport verified against live ROS 2 (Lyrical) traffic,
 `.msg`/`.srv`/`.action`-to-Go codegen with local REP-2011 hash computation,
 lifecycle, parameters, observability with a built-in dashboard, an in-process
@@ -13,9 +13,9 @@ derives the externals block from a live graph rather than trusting a hand
 transcription of it, a lifecycle client that brings somebody else's managed
 stack up in a declared order, a transform tree derived from the robot's own
 URDF rather than transcribed beside it, a MoveIt example whose planning
-groups come from the robot's SRDF, and transient-local durability on both
-transports. This document records the vision, the architecture, and the
-decisions still open.*
+groups come from the robot's SRDF, transient-local durability on both
+transports, and simulated time. This document records the vision, the
+architecture, and the decisions still open.*
 
 ## Thesis
 
@@ -209,7 +209,7 @@ consolidation explicitly, with a comment) are the exact places bugs hide.
 | Bringing a managed stack up | `lifecycle_manager` + `autostart`, ordering in a launch file | `conductor.Lifecycle`: the list of managed nodes is a declaration, `BringUp` configures then activates it in order, teardown runs it in reverse, and the checker validates the list while `conductor externals` verifies the names against a live graph | ✅ v1.6 |
 | Robot description | URDF + xacro, constants duplicated into code and launch files | `conductor frames -from robot.urdf`: fixed joints become the tree's fixed transforms, movable ones the dynamic links a robot_state_publisher provides, and the frame checks then apply to the robot's real description | ✅ v1.7 |
 | Robot description, published | `/robot_description` from a robot_state_publisher launched with the file | published by the application that owns the transform tree, latched, from the same URDF the frames were derived from | ✅ v1.9 |
-| Simulation | `use_sim_time` folklore, hand-written spawn scripts | the simulator is a declared `requires`; a clock source behind `Timer` and header stamping so sim time is the same code path as wall time | v1.7 |
+| Simulation | `use_sim_time` folklore, hand-written spawn scripts | the simulator is a declared `requires`; `-use-sim-time` puts timers, header stamps, `Task.Sleep` and step timeouts on `/clock`, and `use_sim_time` reports the truth | ✅ v1.10 |
 
 ## Observability (v0.8, implemented)
 
@@ -258,6 +258,10 @@ Three decisions worth recording:
 - **Counters out, rates in the page.** The API exposes absolute counters and
   a server timestamp; the page divides successive snapshots. The runtime
   never has to choose a rate window, and pausing the page pauses the maths.
+  The page does pick a *floor* for one: a browser fires its loop when it
+  likes, and two snapshots 20ms apart say nothing about a 5hz topic, so a
+  reading is held until a window long enough to mean something has closed.
+  A blank cell means "not measured yet", which `0.00` does not.
 - **Writes go through the existing paths.** A parameter edit calls the same
   handle `ros2 param set` uses, so type checking is identical; a lifecycle
   button calls the same transition `ros2 lifecycle set` does. The dashboard
@@ -266,6 +270,24 @@ Three decisions worth recording:
 Tracing stays opt-in — a span per callback is not free — and the page is one
 embedded self-contained file, because the machine that most needs the view is
 a robot with no route to a CDN.
+
+**What the page is for (v1.11).** The later milestones each added a way for a
+correctly-running application to look identical to a broken one, and the
+dashboard is where that gets resolved:
+
+- A process on simulated time with no `/clock` has every counter at zero and
+  every node Active. That is not a graph problem, and no panel of counters
+  will ever say so — the clock is in the header, and a stopped one gets a
+  banner. `use_sim_time` moved there too: it is a fact about the process, and
+  rendering it as an editable box on every node card offered a control the
+  runtime refuses.
+- A latched topic that published once at startup and a topic whose publisher
+  died look the same in a count, so transient-local endpoints are marked.
+- A `Lifecycle` field's stack is drawn node by node with the last state
+  observed for it. Deliberately *observed*, not polled: a dashboard calling
+  `get_state` six times a second would be generating the traffic it claims to
+  be reporting, so the client remembers what its own transitions and queries
+  returned, and says "not yet asked" when it has nothing.
 
 **The fleet view (in progress).** A zenoh deployment is one process per node,
 so the honest per-process dashboard is also a partial one: everything beyond
@@ -850,7 +872,54 @@ conductor.json is the description. That adapts to it being named for the robot �
 upstream description renamed to `robot.urdf` stops being obviously the upstream
 file. Two of them is ambiguous, so neither is chosen and the report says so.
 
-## What comes next (v1.10 and beyond)
+## Simulated time (v1.10, implemented)
+
+The test harness proved the idea two milestones before this one: `Tick` drives
+timers because time is something the runtime *reads*, not something it calls.
+Simulated time is the same idea applied to the robot's own world — the runtime
+reads a `Clock`, and `-use-sim-time` decides whether that is the system's or the
+one Gazebo publishes on `/clock`.
+
+What follows the clock is everything that measures the robot's world: timer
+periods, the header stamps a `frame:` tag writes, `Task.Sleep`, and a step's
+`timeout:` and `backoff:`. What stays on the wall clock is everything that
+measures the *program*: spans, metrics, the dashboard's uptime. An operator
+asking why the robot was slow does not want the answer in simulated seconds.
+
+Three properties are the point, and each took a decision:
+
+- **Nothing runs before the simulator speaks.** A clock that has no time yet
+  reports so, and timers do not fire. The alternative — treating "no time" as
+  zero — makes every node tick against a clock nobody agreed to, and then jump.
+- **A waiter created before time began has a duration, not a deadline.** The
+  first version anchored waiters to the zero time, so the first `/clock` message
+  fired all of them at once; a mission's 30-second timeout expired the instant
+  the simulation started. A wait of two seconds means two seconds *of the
+  simulator's time*, counted from when there was time to count from.
+- **A jump is a jump.** Ten simulated seconds arriving at once produces one
+  tick, not ten, and a reset — the world restarting — pulls unreachable
+  deadlines back rather than leaving a timer waiting for an hour that will not
+  come.
+
+One thing had to give: a step's `timeout:` was a `context.WithTimeout`, which is
+wall-clock by construction. It is now a waiter on the clock that cancels the
+context with `DeadlineExceeded` as the cause — so `ctx.Err()` reads "canceled"
+where it used to read "deadline exceeded", and the mission translates at the
+boundary so a fail branch still learns it was a timeout. That is the price of
+timeouts that mean simulated seconds, and it is worth paying.
+
+`use_sim_time` is exposed as a parameter on every node, because tools ask and
+assume the answer took effect. Setting it on a running process is refused rather
+than ignored: switching a robot's time base halfway through a mission is not
+something to do quietly.
+
+Verified against ROS 2 with `.tools/sim_clock.py`, which publishes `/clock` at a
+chosen rate: a robot with no clock publishes nothing at all, its stamps then
+read `sec: 424242` rather than 1.78e9, `ros2 param get use_sim_time` says True,
+and — the measurement that matters — a 5 Hz timer in a world running at a
+quarter speed produces ten messages in eight real seconds.
+
+## What comes next (v1.11 and beyond)
 
 The pattern so far is that each milestone took something ROS leaves as
 folklore and made it a declaration the toolchain can read. What follows is
@@ -867,29 +936,19 @@ are the largest part of that file and the least useful to an orchestrator: they
 matter to the planner, which is not conductor's job. Worth revisiting only if a
 checkable claim turns up that depends on them.
 
-### Simulation and time
+### Scenario tests and replay
 
-Gazebo needs less from conductor than it looks: `conductor run` already
-starts a simulator as a declared `requires` with a readiness condition, and
-spawning models is another command. What simulation actually needs from the
-*runtime* is **time**.
+Simulated time is implemented (above); what it opens up is not.
 
-ROS 2 answers this with `/clock` and a `use_sim_time` parameter, and a node
-that ignores it computes velocities and timeouts against a clock the world is
-not using. Conductor's timers, its header stamping, its mission timeouts and
-its watchdogs all read the wall clock today. The design already has the shape
-of the answer, though: the test harness proved that time can be a source the
-runtime reads rather than a global — `Tick` drives timers deterministically
-in `go test`. Simulated time is the third implementation of that idea, behind
-the same abstraction: wall clock, test clock, `/clock`. Honouring
-`use_sim_time` also matters for interop, since other tools set it on our
-nodes and expect it to be obeyed.
+**Scenario tests** become possible in the same shape as the unit tests: bring up
+a world, run the application, assert on what it did, with time under the test's
+control. The clock is already a source the runtime reads, and the harness can
+already pass one — what is missing is the world, and a way to say "run until the
+robot has done X, however long that takes in simulated seconds".
 
-With that in place, **scenario tests** become possible in the same shape as
-the unit tests: bring up a world, run the application, assert on what it did,
-with time under the test's control. The cheaper cousin is **rosbag replay** —
-conductor knows exactly which topics an application consumes, so it could
-record precisely those and replay them into the harness, giving regression
+The cheaper cousin is **rosbag replay**: conductor knows exactly which topics an
+application consumes, so it could record precisely those and replay them into
+the harness — with the recorded stamps driving the clock — giving regression
 tests from real robot data without a simulator at all.
 
 ### Smaller things worth doing

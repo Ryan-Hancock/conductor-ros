@@ -86,7 +86,7 @@ func (f *TF) bind(rt *runtimeState, nr *nodeRuntime, field reflect.StructField, 
 		if !nr.active() {
 			return
 		}
-		if err := publish(tfStatic(statics, time.Now()), Metadata{}); err != nil {
+		if err := publish(tfStatic(statics, rt.clock.Now()), Metadata{}); err != nil {
 			slog.Warn("conductor: tf_static publish failed", "node", nr.name, "err", err)
 			return
 		}
@@ -170,7 +170,7 @@ func findHeader(t reflect.Type) *headerAccess {
 
 // stampFrame fills an outgoing message's frame id and timestamp, leaving
 // anything the handler set itself alone.
-func (a *headerAccess) stampFrame(v reflect.Value, frame string) {
+func (a *headerAccess) stampFrame(v reflect.Value, frame string, clock Clock) {
 	f := v.FieldByIndex(a.frame)
 	if f.String() == "" {
 		f.SetString(frame)
@@ -178,7 +178,10 @@ func (a *headerAccess) stampFrame(v reflect.Value, frame string) {
 	if a.stamp != nil {
 		s := v.FieldByIndex(a.stamp)
 		if s.Interface().(time.Time).IsZero() {
-			s.Set(reflect.ValueOf(time.Now()))
+			// The robot's clock, not the machine's: a stamp in wall time on a
+			// simulated robot is what makes every consumer's transform lookup
+			// fail by hours.
+			s.Set(reflect.ValueOf(clock.Now()))
 		}
 	}
 }

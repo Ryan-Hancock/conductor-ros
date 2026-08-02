@@ -35,13 +35,18 @@ type Endpoint struct {
 	Name   string       `json:"name"`           // topic, service or action name
 	Type   string       `json:"type,omitempty"` // ROS interface name when known
 	QoS    string       `json:"qos,omitempty"`
-	Rate   string       `json:"rate,omitempty"`  // timers
+	Rate   string       `json:"rate,omitempty"`  // timers, or a live summary
 	Frame  string       `json:"frame,omitempty"` // frame tag, when declared
 	count  *countFunc   // live message/call count, nil if not counted
+	detail *detailFunc  // live summary, overriding Rate when set
 	Counts uint64       `json:"counts"`
 }
 
 type countFunc func() uint64
+
+type detailFunc func() string
+
+func detailOf(f detailFunc) *detailFunc { return &f }
 
 func (rt *runtimeState) recordEndpoint(e Endpoint) {
 	rt.endpoints = append(rt.endpoints, e)
@@ -52,6 +57,9 @@ func (rt *runtimeState) endpointsSnapshot() []Endpoint {
 	out := make([]Endpoint, len(rt.endpoints))
 	copy(out, rt.endpoints)
 	for i := range out {
+		if out[i].detail != nil {
+			out[i].Rate = (*out[i].detail)()
+		}
 		if out[i].count != nil {
 			out[i].Counts = (*out[i].count)()
 		}

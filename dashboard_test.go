@@ -21,6 +21,11 @@ type dashNode struct {
 type dashReq struct{ N int }
 type dashResp struct{ N int }
 
+// latchNode publishes the other durability, so the two are distinguishable.
+type latchNode struct {
+	Tree Pub[ping] `topic:"tree" qos:"transient"`
+}
+
 func (d *dashNode) OnTick()                            { d.Out.Publish(ping{V: 1}) }
 func (d *dashNode) OnEcho(r dashReq) (dashResp, error) { return dashResp{N: r.N}, nil }
 
@@ -34,6 +39,46 @@ func newDashboard(t *testing.T, traceDepth int, nodes ...any) *dashboard {
 		AddExporter(d.ring)
 	}
 	return d
+}
+
+// A latched topic that has published once looks exactly like a dead one — a
+// count of 1 and nothing since — so the page has to say which it is.
+func TestDashboardMarksLatchedTopics(t *testing.T) {
+	d := newDashboard(t, 0, &dashNode{}, &latchNode{})
+	byName := map[string]TopicView{}
+	for _, t := range d.state().Topics {
+		byName[t.Name] = t
+	}
+	if !byName["tree"].Latched {
+		t.Errorf("tree = %+v, want latched for a transient-local publisher", byName["tree"])
+	}
+	if byName["pings"].Latched {
+		t.Errorf("pings = %+v, want not latched for a volatile publisher", byName["pings"])
+	}
+}
+
+// Under simulated time a clock nobody has published is why nothing on the
+// page is moving, so the state has to carry that fact rather than leave the
+// operator to infer it from every counter reading zero.
+func TestDashboardReportsAStoppedSimulatedClock(t *testing.T) {
+	sim := newSimClock()
+	ta, err := NewTestApp(TestOptions{Clock: sim, SimTime: true}, &dashNode{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(ta.Close)
+	d := &dashboard{app: ta.a, transport: "inproc", started: time.Now()}
+
+	s := d.state()
+	if s.App.Clock != "sim" || s.App.ClockStarted {
+		t.Errorf("app clock = %q started=%v, want a sim clock that has not started",
+			s.App.Clock, s.App.ClockStarted)
+	}
+	sim.Set(simEpoch)
+	if s := d.state(); !s.App.ClockStarted || !s.App.ClockTime.Equal(simEpoch) {
+		t.Errorf("app clock = %v started=%v, want the simulator's time",
+			s.App.ClockTime, s.App.ClockStarted)
+	}
 }
 
 func TestDashboardStateDescribesTheWiredApplication(t *testing.T) {
@@ -82,8 +127,21 @@ func TestDashboardStateDescribesTheWiredApplication(t *testing.T) {
 	}
 
 	// Parameters are reported with their current value, not the default.
-	if len(dash.Params) != 1 || dash.Params[0].Name != "limit" || dash.Params[0].Value != "1.5" {
+	byName := map[string]string{}
+	for _, p := range dash.Params {
+		byName[p.Name] = p.Value
+	}
+	if byName["limit"] != "1.5" {
 		t.Errorf("params = %+v", dash.Params)
+	}
+	// use_sim_time is a fact about the process, so it is reported once by the
+	// header rather than as a knob on every node — the runtime refuses to set
+	// it, and a box you cannot type into is worse than no box.
+	if _, ok := byName["use_sim_time"]; ok {
+		t.Errorf("params = %+v, want no per-node use_sim_time", dash.Params)
+	}
+	if s.App.Clock != "wall" || !s.App.ClockStarted {
+		t.Errorf("app clock = %q started=%v, want a started wall clock", s.App.Clock, s.App.ClockStarted)
 	}
 
 	// The topic view is the graph: one publisher, one subscriber.

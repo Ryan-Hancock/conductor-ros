@@ -18,9 +18,11 @@ type Pub[T any] struct {
 	sent    atomic.Uint64
 
 	// frame and header come from a frame tag: the runtime stamps the
-	// declared frame into every outgoing message's header.
+	// declared frame into every outgoing message's header, with the time the
+	// robot is keeping.
 	frame  string
 	header *headerAccess
+	clock  Clock
 }
 
 // Topic returns the wired topic name (empty before Run).
@@ -41,7 +43,7 @@ func (p *Pub[T]) Publish(msg T) {
 		return
 	}
 	if p.header != nil {
-		p.header.stampFrame(reflect.ValueOf(&msg).Elem(), p.frame)
+		p.header.stampFrame(reflect.ValueOf(&msg).Elem(), p.frame, p.clock)
 	}
 	var md Metadata
 	if p.node != nil {
@@ -79,7 +81,7 @@ func (p *Pub[T]) bind(rt *runtimeState, nr *nodeRuntime, field reflect.StructFie
 	p.topic = topic
 	p.publish = publish
 	p.node = nr
-	p.frame, p.header = frame, header
+	p.frame, p.header, p.clock = frame, header, rt.clock
 	rt.recordProvides(nr.name, topic)
 	rt.recordEndpoint(Endpoint{Node: nr.name, Kind: EndpointPub, Field: field.Name, Name: topic,
 		Type: rosTypeName(reflect.TypeFor[T]()), QoS: q.Name, Frame: frame, count: countOf(p.sent.Load)})

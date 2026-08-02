@@ -128,14 +128,22 @@ func (t *Task) Goto(step string) error { return gotoStep{step: step} }
 // Sleep waits for d, or until the step's context is canceled — the form of
 // sleep a step should use, since it can be interrupted by a deactivation.
 func (t *Task) Sleep(d time.Duration) error {
-	timer := time.NewTimer(d)
-	defer timer.Stop()
 	select {
-	case <-timer.C:
+	case <-t.runner.clock().After(d):
 		return nil
 	case <-t.ctx.Done():
-		return t.ctx.Err()
+		return t.stopped()
 	}
+}
+
+// stopped is why the step's context ended: the step's own timeout, or the
+// mission being canceled. context.Cause carries the distinction that ctx.Err
+// flattens into "canceled", and a fail branch wants to know which it was.
+func (t *Task) stopped() error {
+	if cause := context.Cause(t.ctx); cause != nil {
+		return cause
+	}
+	return t.ctx.Err()
 }
 
 // Do runs fn on the node's executor and waits for it to finish, so a step can
@@ -150,7 +158,7 @@ func (t *Task) Do(fn func()) error {
 	case <-done:
 		return nil
 	case <-t.ctx.Done():
-		return t.ctx.Err()
+		return t.stopped()
 	case <-t.runner.node.quit:
 		return fmt.Errorf("node %s shut down", t.runner.node.name)
 	}
@@ -324,6 +332,11 @@ type missionRunner struct {
 	steps map[string]*stepDef
 	order []*stepDef
 
+	// clocks is where the mission reads time: a step's timeout, its backoff and
+	// Task.Sleep are all the robot's time, not the machine's, so a mission runs
+	// at the pace of the world it is in.
+	clocks Clock
+
 	mu     sync.Mutex
 	state  missionState
 	cancel context.CancelFunc
@@ -349,6 +362,7 @@ func wireMission(rt *runtimeState, nr *nodeRuntime) error {
 		return nil
 	}
 	r := nr.mission
+	r.clocks = rt.clock
 	r.steps = map[string]*stepDef{}
 	for _, def := range nr.steps {
 		if _, dup := r.steps[def.name]; dup {
@@ -471,7 +485,7 @@ func (r *missionRunner) run(ctx context.Context, done chan struct{}) {
 				"node", r.node.name, "mission", r.name, "step", def.name, "attempt", attempt, "err", err)
 			counter("conductor_mission_step_retries_total", "node", r.node.name, "mission", r.name, "step", def.name).Add(1)
 			attempt++
-			if def.backoff > 0 && !sleepCtx(ctx, def.backoff) {
+			if def.backoff > 0 && !sleepCtx(r.clock(), ctx, def.backoff) {
 				r.finish(MissionCanceled, nil)
 				return
 			}
@@ -489,9 +503,22 @@ func (r *missionRunner) run(ctx context.Context, done chan struct{}) {
 
 // runStep executes one step with its own context, span and metrics.
 func (r *missionRunner) runStep(ctx context.Context, def *stepDef, attempt int, cause error) error {
-	sctx, cancel := context.WithCancel(ctx)
+	// A step's timeout is measured on the robot's clock, not the machine's: a
+	// simulation running at a tenth of real speed should give a step the same
+	// simulated seconds it would have on the robot. context.WithTimeout cannot
+	// do that, so the deadline is a waiter on the clock — cancelling with
+	// DeadlineExceeded as the cause, so a step still sees why it was stopped.
+	sctx, cancelCause := context.WithCancelCause(ctx)
+	cancel := func() { cancelCause(nil) }
 	if def.timeout > 0 {
-		sctx, cancel = context.WithTimeout(ctx, def.timeout)
+		expired := r.clock().After(def.timeout)
+		go func() {
+			select {
+			case <-expired:
+				cancelCause(context.DeadlineExceeded)
+			case <-sctx.Done():
+			}
+		}()
 	}
 	defer cancel()
 
@@ -504,6 +531,13 @@ func (r *missionRunner) runStep(ctx context.Context, def *stepDef, attempt int, 
 	}
 	start := time.Now()
 	err := def.handler(t)
+	// A clock-driven deadline cancels the context, so ctx.Err() is Canceled and
+	// the reason lives in the cause. A step that simply returned its context's
+	// error should still send "timed out" to the fail branch, which is what it
+	// meant and what the tag promised.
+	if cause := context.Cause(sctx); errors.Is(cause, context.DeadlineExceeded) && errors.Is(err, context.Canceled) {
+		err = cause
+	}
 	var jump gotoStep
 	if errors.As(err, &jump) {
 		span.finish(nil)
@@ -526,6 +560,15 @@ func (r *missionRunner) enter(step string, attempt int) {
 	r.mu.Unlock()
 	counter("conductor_mission_step_entries_total", "node", r.node.name, "mission", r.name, "step", step).Add(1)
 	slog.Debug("conductor: mission step", "node", r.node.name, "mission", r.name, "step", step, "attempt", attempt)
+}
+
+// clock is the mission's time source, defaulting to the wall clock for a
+// runner built outside Run (tests construct these directly).
+func (r *missionRunner) clock() Clock {
+	if r.clocks == nil {
+		return wallClock{}
+	}
+	return r.clocks
 }
 
 func (r *missionRunner) setErr(err error) {
@@ -561,11 +604,9 @@ func (r *missionRunner) finish(status MissionStatus, err error) {
 	}
 }
 
-func sleepCtx(ctx context.Context, d time.Duration) bool {
-	t := time.NewTimer(d)
-	defer t.Stop()
+func sleepCtx(clock Clock, ctx context.Context, d time.Duration) bool {
 	select {
-	case <-t.C:
+	case <-clock.After(d):
 		return true
 	case <-ctx.Done():
 		return false

@@ -60,6 +60,12 @@ type TestOptions struct {
 	// runtime; it is published on /robot_description when this application
 	// owns the transform tree.
 	Description string
+	// Clock is the time source the runtime reads: nil for the wall clock. A
+	// test that wants simulated time passes one and drives it.
+	Clock Clock
+	// SimTime is what use_sim_time reports. Tests that pass a Clock usually
+	// want it true, so the node says what it is doing.
+	SimTime bool
 }
 
 // NewTestApp wires nodes and (unless ManualLifecycle) brings them up.
@@ -73,6 +79,8 @@ func NewTestApp(opts TestOptions, nodes ...any) (*TestApp, error) {
 		frames:       opts.Frames,
 		semantics:    opts.Semantics,
 		description:  opts.Description,
+		clock:        opts.Clock,
+		simTime:      opts.SimTime,
 	}, nodes...)
 	if err != nil {
 		return nil, err

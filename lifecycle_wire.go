@@ -187,6 +187,24 @@ var intermediateState = map[Transition]State{
 }
 
 // shutdownFor returns the shutdown transition valid from a primary state.
+// resultOf is the state a node lands in when a transition succeeds. Only the
+// four transitions an application drives are listed: the error and shutdown
+// paths end wherever the node's own handlers take it, and guessing there
+// would be worse than admitting we do not know.
+func resultOf(t Transition) (State, bool) {
+	switch t {
+	case TransitionConfigure:
+		return StateInactive, true
+	case TransitionActivate:
+		return StateActive, true
+	case TransitionDeactivate:
+		return StateInactive, true
+	case TransitionCleanup:
+		return StateUnconfigured, true
+	}
+	return StateUnknown, false
+}
+
 func shutdownFor(s State) (Transition, bool) {
 	switch s {
 	case StateUnconfigured:

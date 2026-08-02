@@ -88,6 +88,17 @@ type AppView struct {
 	Uptime    float64   `json:"uptime_seconds"`
 	Bringup   []string  `json:"bringup_order"`
 	Tracing   bool      `json:"tracing"`
+
+	// Which clock the robot is on, and what it reads. Under simulated time a
+	// clock that has not started is why nothing is happening, and that is worth
+	// saying on the page rather than leaving an operator to wonder.
+	Clock        string    `json:"clock"` // "wall" or "sim"
+	ClockTime    time.Time `json:"clock_time"`
+	ClockStarted bool      `json:"clock_started"`
+
+	// Description is the robot model this process publishes, empty when the
+	// description belongs to somebody else.
+	Description bool `json:"publishes_description"`
 }
 
 type NodeView struct {
@@ -111,13 +122,32 @@ type ParamView struct {
 // TopicView is the graph edge: who publishes, who subscribes, and whether
 // the other end is outside this process.
 type TopicView struct {
-	Name  string   `json:"name"`
-	Type  string   `json:"type"`
-	QoS   string   `json:"qos"`
-	Pubs  []string `json:"pubs"`
-	Subs  []string `json:"subs"`
-	Sent  uint64   `json:"sent"`
-	Recvd uint64   `json:"received"`
+	Name string   `json:"name"`
+	Type string   `json:"type"`
+	QoS  string   `json:"qos"`
+	Pubs []string `json:"pubs"`
+	Subs []string `json:"subs"`
+	// Latched marks a transient-local topic: its last message is kept for
+	// subscribers that have not started yet, so a count of one is not a topic
+	// that has gone quiet.
+	Latched bool   `json:"latched"`
+	Sent    uint64 `json:"sent"`
+	Recvd   uint64 `json:"received"`
+}
+
+// latchedProfile reports whether a QoS profile keeps its last message for
+// subscribers that have not started yet.
+func latchedProfile(name string) bool {
+	q, ok := QoSProfile(name)
+	return ok && q.Durability == TransientLocal
+}
+
+// clockKind names the time base this process is on, for the header.
+func clockKind(rt *runtimeState) string {
+	if rt.simTime {
+		return "sim"
+	}
+	return "wall"
 }
 
 type TraceView struct {
@@ -287,6 +317,12 @@ func (d *dashboard) snapshot(full bool) DashboardState {
 	for _, nr := range rt.nodes {
 		params := make([]ParamView, 0, len(nr.params))
 		for _, h := range nr.params {
+			// use_sim_time is a fact about the process, not a knob on a node:
+			// it is reported once in the header, and showing an editable box
+			// for it on every card would offer something the runtime refuses.
+			if h.name == useSimTimeParam {
+				continue
+			}
 			params = append(params, ParamView{
 				Name:  h.name,
 				Type:  h.typeOf.String(),
@@ -341,6 +377,11 @@ func (d *dashboard) snapshot(full bool) DashboardState {
 			Uptime:    time.Since(d.started).Seconds(),
 			Bringup:   order,
 			Tracing:   d.ring != nil,
+
+			Clock:        clockKind(rt),
+			ClockTime:    rt.clock.Now(),
+			ClockStarted: rt.clock.Started(),
+			Description:  rt.descriptionPublisher != "",
 		},
 		Nodes:    nodes,
 		Topics:   topicViews(endpoints),
@@ -438,11 +479,13 @@ func topicViews(endpoints []Endpoint) []TopicView {
 			t := get(e.Name)
 			t.Pubs = appendUnique(t.Pubs, e.Node)
 			t.Type, t.QoS = e.Type, e.QoS
+			t.Latched = t.Latched || latchedProfile(e.QoS)
 			t.Sent += e.Counts
 		case EndpointSub:
 			t := get(e.Name)
 			t.Subs = appendUnique(t.Subs, e.Node)
 			t.Type, t.QoS = e.Type, e.QoS
+			t.Latched = t.Latched || latchedProfile(e.QoS)
 			t.Recvd += e.Counts
 		}
 	}

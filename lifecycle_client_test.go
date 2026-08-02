@@ -87,6 +87,31 @@ func TestLifecycleClientBringsAStackUp(t *testing.T) {
 	}
 }
 
+// The dashboard asks what the stack is doing, and asking must not mean six
+// service calls a second — the client reports what it last saw, and says so
+// when it has not looked yet.
+func TestLifecycleClientSummarisesTheStack(t *testing.T) {
+	_, mgr := manualApp(t, &managedAlpha{}, &managedBeta{})
+
+	if got := mgr.Stack.summary(); got != "2 node(s), not yet asked" {
+		t.Errorf("summary before any call = %q", got)
+	}
+	if err := mgr.Stack.BringUp(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	// BringUp never calls get_state on a node it drove all the way up, so this
+	// is the transition results being remembered, not a fresh query.
+	if got := mgr.Stack.summary(); got != "2 node(s), all active" {
+		t.Errorf("summary after BringUp = %q", got)
+	}
+	if err := mgr.Stack.Deactivate("managed_beta"); err != nil {
+		t.Fatal(err)
+	}
+	if got := mgr.Stack.summary(); got != "1 of 2 node(s) active, one is inactive" {
+		t.Errorf("summary after one node stood down = %q", got)
+	}
+}
+
 // A mission step declaring retry:"3" re-runs BringUp after a partial failure,
 // so it has to be safe to call again: nodes already up are left alone rather
 // than driven through a transition they cannot make.

@@ -8,6 +8,7 @@ import (
 	"reflect"
 	"sort"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 )
@@ -49,6 +50,13 @@ type Lifecycle struct {
 	state  map[string]func(any, time.Duration) (any, error)
 
 	calls atomic.Uint64
+
+	// seen is the last state observed for each node, so the dashboard can say
+	// whether the stack is up without polling six services a second. It is a
+	// memory, not a subscription: a node that changed state on its own is not
+	// reflected here until something asks again.
+	mu   sync.Mutex
+	seen map[string]State
 }
 
 // ErrNotActive reports managed nodes that did not reach Active.
@@ -77,9 +85,47 @@ func (l *Lifecycle) State(node string) (State, error) {
 	l.calls.Add(1)
 	res, err := call(getStateRequest{}, l.timeout)
 	if err != nil {
+		l.observe(node, StateUnknown)
 		return StateUnknown, fmt.Errorf("%s/get_state: %w", node, err)
 	}
-	return State(res.(getStateResponse).CurrentState.Id), nil
+	state := State(res.(getStateResponse).CurrentState.Id)
+	l.observe(node, state)
+	return state, nil
+}
+
+func (l *Lifecycle) observe(node string, state State) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.seen == nil {
+		l.seen = make(map[string]State, len(l.nodes))
+	}
+	l.seen[node] = state
+}
+
+// summary describes the managed stack for the dashboard: how many nodes are
+// where we last saw them, phrased so that "nothing has asked yet" is
+// distinguishable from "everything is down".
+func (l *Lifecycle) summary() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if len(l.seen) == 0 {
+		return fmt.Sprintf("%d node(s), not yet asked", len(l.nodes))
+	}
+	active, worst := 0, StateUnknown
+	for _, node := range l.nodes {
+		switch state, ok := l.seen[node]; {
+		case !ok:
+			continue
+		case state == StateActive:
+			active++
+		default:
+			worst = state
+		}
+	}
+	if active == len(l.nodes) {
+		return fmt.Sprintf("%d node(s), all active", len(l.nodes))
+	}
+	return fmt.Sprintf("%d of %d node(s) active, one is %s", active, len(l.nodes), worst)
 }
 
 // States is the state of every declared node. A node that cannot be reached
@@ -127,6 +173,9 @@ func (l *Lifecycle) Transition(node string, t Transition) error {
 	}
 	if !res.(changeStateResponse).Success {
 		return fmt.Errorf("%s refused to %s", node, t)
+	}
+	if state, ok := resultOf(t); ok {
+		l.observe(node, state)
 	}
 	return nil
 }
@@ -310,7 +359,7 @@ func (l *Lifecycle) bind(rt *runtimeState, nr *nodeRuntime, field reflect.Struct
 	// services would bury it.
 	rt.recordEndpoint(Endpoint{Node: nr.name, Kind: EndpointLifecycle, Field: field.Name,
 		Name: strings.Join(nodes, ","), Type: "lifecycle_msgs/srv/ChangeState",
-		count: countOf(l.calls.Load)})
+		count: countOf(l.calls.Load), detail: detailOf(l.summary)})
 	return nil
 }
 

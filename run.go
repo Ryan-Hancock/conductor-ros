@@ -41,6 +41,12 @@ type runtimeState struct {
 	// descriptionPublisher names it, so one process publishes once.
 	description          string
 	descriptionPublisher string
+
+	// clock is where everything that measures the robot's world reads time:
+	// the wall clock, or the simulator's if -use-sim-time is set. simTime says
+	// which, for the use_sim_time parameter every node carries.
+	clock   Clock
+	simTime bool
 }
 
 // binder is implemented by the framework field types (Sub, Pub, Param, Timer);
@@ -76,6 +82,8 @@ func Run(nodes ...any) {
 	groupsFile := fs.String("groups", "groups.json", "planning groups to resolve conductor.Group fields against")
 	descriptionFile := fs.String("description", "robot.urdf",
 		"robot description to publish on /robot_description (when this application owns the transform tree)")
+	useSimTime := fs.Bool("use-sim-time", envSimTime(),
+		"take time from /clock rather than the system clock (a simulator publishes it)")
 	var paramFiles stringList
 	fs.Var(&paramFiles, "params", "parameter file to load (repeatable; later files win)")
 	env := fs.String("env", "", "environment name: also loads params.<env>.yaml next to the last -params file, or ./params.<env>.yaml")
@@ -157,6 +165,7 @@ func Run(nodes ...any) {
 		frames:      frames,
 		semantics:   semantics,
 		description: description,
+		simTime:     *useSimTime,
 	}, nodes...)
 	if err != nil {
 		slog.Error("conductor: startup failed", "err", err)
@@ -322,6 +331,16 @@ func findFramesFile(path string, explicit bool) (string, error) {
 	return path, nil // absent: an application may declare no frames
 }
 
+// envSimTime lets a launch file or a systemd unit choose the clock the way ROS
+// tooling does, without every command line having to carry the flag.
+func envSimTime() bool {
+	switch strings.ToLower(os.Getenv("USE_SIM_TIME")) {
+	case "1", "true", "yes":
+		return true
+	}
+	return false
+}
+
 // appOptions is everything Run's flags (or a test harness) can vary about
 // how an application is wired.
 type appOptions struct {
@@ -333,6 +352,8 @@ type appOptions struct {
 	frames       *FrameTree                   // declared transform tree, if any
 	semantics    *Semantics                   // declared planning groups, if any
 	description  string                       // robot description to publish, if this app owns it
+	clock        Clock                        // time source; nil means the wall clock
+	simTime      bool                         // read /clock rather than the system clock
 }
 
 func newApp(transportName string, topts TransportOptions, only string, nodeStructs ...any) (*app, error) {
@@ -348,9 +369,26 @@ func newAppOpts(o appOptions, nodeStructs ...any) (*app, error) {
 	if err != nil {
 		return nil, err
 	}
+	clock := o.clock
+	var sim *simClock
+	if clock == nil && o.simTime {
+		sim = newSimClock()
+		clock = sim
+	}
+	if clock == nil {
+		clock = wallClock{}
+	}
 	rt := &runtimeState{
 		transport: tr, paramValues: o.params,
 		frames: o.frames, semantics: o.semantics, description: o.description,
+		clock: clock, simTime: o.simTime,
+	}
+	if sim != nil {
+		if err := subscribeClock(rt, sim); err != nil {
+			return nil, fmt.Errorf("subscribing to %s: %w", clockTopic, err)
+		}
+		slog.Info("conductor: using simulated time", "topic", clockTopic,
+			"note", "timers do not fire until the simulator publishes a time")
 	}
 	for _, ns := range nodeStructs {
 		ptr := reflect.ValueOf(ns)
@@ -376,6 +414,8 @@ func newAppOpts(o appOptions, nodeStructs ...any) (*app, error) {
 		if err := bindFields(rt, nr, ptr); err != nil {
 			return nil, fmt.Errorf("%s: %w", t.Name(), err)
 		}
+		// Every ROS node carries use_sim_time, and tools ask.
+		declareSimTimeParam(rt, nr)
 		if err := bindLifecycle(rt, nr); err != nil {
 			return nil, fmt.Errorf("%s lifecycle: %w", t.Name(), err)
 		}
